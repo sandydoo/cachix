@@ -9,6 +9,7 @@ module Cachix.Client.Retry
 where
 
 import Control.Exception.Safe (Handler (..), MonadMask, isSyncException)
+-- TODO: switch to UnliftIO.Retry
 import Control.Retry (RetryPolicy, RetryPolicyM, RetryStatus, constantDelay, exponentialBackoff, limitRetries, logRetries, recoverAll, recovering, skipAsyncExceptions)
 import Protolude hiding (Handler (..))
 
@@ -17,8 +18,14 @@ retryAll =
   recoverAll defaultRetryPolicy
 
 -- Catches all exceptions except async exceptions with logging support
-retryAllWithLogging :: (MonadIO m, MonadMask m) => RetryPolicyM m -> (Bool -> SomeException -> RetryStatus -> m ()) -> m a -> m a
-retryAllWithLogging retryPolicy logger action = recovering retryPolicy handlers $ const action
+retryAllWithLogging ::
+  (MonadIO m, MonadMask m) =>
+  RetryPolicyM m ->
+  (Bool -> SomeException -> RetryStatus -> m ()) ->
+  m a ->
+  m a
+retryAllWithLogging retryPolicy logger action =
+  recovering retryPolicy handlers (const action)
   where
     handlers = skipAsyncExceptions ++ [exitSuccessHandler, loggingHandler]
     exitSuccessHandler :: MonadIO m => RetryStatus -> Handler m Bool

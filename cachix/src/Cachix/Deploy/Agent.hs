@@ -17,8 +17,10 @@ import Protolude.Conv
 import qualified Servant.Client as Servant
 
 run :: CachixOptions.CachixOptions -> AgentOptions.AgentOptions -> IO ()
-run cachixOptions agentOpts = do
-  CachixWebsocket.runForever options handleMessage
+run cachixOptions agentOpts =
+  CachixWebsocket.withKatip (CachixWebsocket.isVerbose options) $ \logEnv ->
+    K.runKatipContextT logEnv () "agent" $
+      CachixWebsocket.runForever options handleMessage
   where
     host = toS $ Servant.baseUrlHost $ getBaseUrl $ CachixOptions.host cachixOptions
     name = AgentOptions.name agentOpts
@@ -30,8 +32,13 @@ run cachixOptions agentOpts = do
           CachixWebsocket.profile = AgentOptions.profile agentOpts,
           CachixWebsocket.isVerbose = CachixOptions.verbose cachixOptions
         }
-    handleMessage :: ByteString -> (K.KatipContextT IO () -> IO ()) -> WS.Connection -> CachixWebsocket.AgentState -> ByteString -> K.KatipContextT IO ()
-    handleMessage payload _ _ agentState _ = do
+    handleMessage ::
+      WS.Connection ->
+      CachixWebsocket.AgentState ->
+      ByteString ->
+      ByteString ->
+      K.KatipContextT IO ()
+    handleMessage _ agentState _ payload =
       CachixWebsocket.parseMessage payload (handleCommand . WSS.command)
       where
         handleCommand :: WSS.BackendCommand -> K.KatipContextT IO ()

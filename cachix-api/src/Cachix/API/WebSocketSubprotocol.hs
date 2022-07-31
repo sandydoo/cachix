@@ -3,13 +3,13 @@
 
 module Cachix.API.WebSocketSubprotocol where
 
-import qualified Control.Concurrent.Async as Async
 import qualified Control.Concurrent.Chan as Chan
 import qualified Data.Aeson as Aeson
 import Data.Time (UTCTime)
 import Data.UUID (UUID)
 import qualified Network.WebSockets as WS
 import Protolude
+import qualified UnliftIO.Async as Async
 
 data Message cmd = Message
   { method :: Text,
@@ -60,17 +60,17 @@ sendMessage connection cmd =
   WS.sendTextData connection $ Aeson.encode cmd
 
 -- TODO: use Async.replicateConcurrently
-recieveDataConcurrently :: WS.Connection -> (ByteString -> IO ()) -> IO ()
-recieveDataConcurrently connection m = do
+receiveDataConcurrently :: WS.Connection -> (ByteString -> IO ()) -> IO ()
+receiveDataConcurrently connection m = do
   channel <- Chan.newChan
   Async.race_ (producer channel) (consumer channel)
   where
-    producer channel = forever $ do
-      payload <- WS.receiveData connection
-      Chan.writeChan channel payload
-    consumer channel = forever $ do
-      payload <- Chan.readChan channel
-      m payload
+    producer channel =
+      forever $
+        WS.receiveData connection >>= Chan.writeChan channel
+    consumer channel =
+      forever $
+        Chan.readChan channel >>= m
 
 data Log = Log
   { line :: Text,

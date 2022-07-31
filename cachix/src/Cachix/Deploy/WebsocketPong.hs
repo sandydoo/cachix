@@ -2,10 +2,10 @@
 -- TODO: upstream to https://github.com/jaspervdj/websockets/issues/159
 module Cachix.Deploy.WebsocketPong where
 
-import Data.IORef
 import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime, nominalDiffTimeToSeconds)
 import qualified Network.WebSockets as WS
-import Protolude
+import Protolude hiding (throwTo)
+import UnliftIO
 
 type LastPongState = IORef UTCTime
 
@@ -15,28 +15,24 @@ data WebsocketPongTimeout
 
 instance Exception WebsocketPongTimeout
 
-newState :: IO LastPongState
-newState = do
-  now <- getCurrentTime
-  newIORef now
+newState :: (MonadIO m) => m LastPongState
+newState = newIORef =<< liftIO getCurrentTime
 
 -- everytime we send a ping we check if we also got a pong back
-pingHandler :: LastPongState -> ThreadId -> Int -> IO ()
+pingHandler :: (MonadIO m) => LastPongState -> ThreadId -> Int -> m ()
 pingHandler state threadID maxLastPing = do
   last <- secondsSinceLastPong state
-  when (last > maxLastPing) $ do
-    throwTo threadID WebsocketPongTimeout
+  when (last > maxLastPing) $ throwTo threadID WebsocketPongTimeout
 
-secondsSinceLastPong :: LastPongState -> IO Int
+secondsSinceLastPong :: (MonadIO m) => LastPongState -> m Int
 secondsSinceLastPong state = do
-  now <- getCurrentTime
+  now <- liftIO getCurrentTime
   last <- readIORef state
-  return $ ceiling $ nominalDiffTimeToSeconds $ diffUTCTime now last
+  return . ceiling . nominalDiffTimeToSeconds $ diffUTCTime now last
 
-pongHandler :: LastPongState -> IO ()
-pongHandler state = do
-  now <- getCurrentTime
-  writeIORef state now
+pongHandler :: (MonadIO m) => LastPongState -> m ()
+pongHandler state =
+  writeIORef state =<< liftIO getCurrentTime
 
 installPongHandler :: LastPongState -> WS.ConnectionOptions -> WS.ConnectionOptions
 installPongHandler state opts = opts {WS.connectionOnPong = pongHandler state}

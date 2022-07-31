@@ -125,6 +125,7 @@ library
     , text
     , time
     , unix
+    , unliftio
     , unordered-containers
     , uri-bytestring
     , uuid
@@ -171,6 +172,7 @@ executable .cachix-deployment
     , stm
     , stm-conduit
     , time
+    , unliftio
     , uuid
     , websockets
     , wuss
