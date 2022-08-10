@@ -1,4 +1,6 @@
 {-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE ImportQualifiedPost #-}
+{-# LANGUAGE RecordWildCards #-}
 
 module Main
   ( main,
@@ -6,29 +8,56 @@ module Main
 where
 
 import Cachix.API.Error (escalateAs)
-import qualified Cachix.API.WebSocketSubprotocol as WSS
+import Cachix.API.WebSocketSubprotocol qualified as WSS
 import Cachix.Client.Retry
-import qualified Cachix.Deploy.Activate as Activate
-import qualified Cachix.Deploy.Websocket as CachixWebsocket
+import Cachix.Deploy.Activate qualified as Activate
+import Cachix.Deploy.Websocket qualified as CachixWebsocket
 import Conduit ((.|))
-import qualified Control.Concurrent.Async as Async
-import qualified Control.Concurrent.STM.TQueue as TQueue
-import qualified Data.Aeson as Aeson
-import qualified Data.Conduit as Conduit
-import qualified Data.Conduit.Combinators as Conduit
-import qualified Data.Conduit.TQueue as Conduit
+import Control.Concurrent.Async qualified as Async
+import Control.Concurrent.STM.TMQueue qualified as TMQueue
+import Data.Aeson qualified as Aeson
+import Data.Conduit qualified as Conduit
+import Data.Conduit.Combinators qualified as Conduit
+import Data.Conduit.TQueue qualified as Conduit
 import Data.String (String)
 import Data.Time.Clock (getCurrentTime)
 import Data.UUID (UUID)
-import qualified Data.UUID as UUID
+import Data.UUID qualified as UUID
 import GHC.IO.Encoding
-import qualified Katip as K
+import Katip qualified as K
 import Network.HTTP.Simple (RequestHeaders)
-import qualified Network.WebSockets as WS
+import Network.WebSockets qualified as WS
 import Protolude hiding (toS)
 import Protolude.Conv
 import System.IO (BufferMode (..), hSetBuffering)
-import qualified Wuss
+import Wuss qualified
+
+type Logger = K.KatipContextT IO () -> IO ()
+
+data Env = Env
+  { input :: CachixWebsocket.Input,
+    connection :: WS.Connection,
+    logger :: Logger,
+    agentToken :: ByteString
+  }
+
+newtype CachixDeployer a = CachixDeployer
+  { deploy :: ReaderT Env (K.KatipContextT IO) a
+  }
+  deriving
+    ( Functor,
+      Applicative,
+      Monad,
+      MonadReader Env,
+      MonadIO
+    )
+
+instance K.Katip CachixDeployer where
+  getLogEnv = K.getLogEnv
+
+instance K.KatipContext CachixDeployer where
+  getKatipContext = K.getKatipContext
+  getKatipNamespace = K.getKatipNamespace
 
 main :: IO ()
 main = do
@@ -36,43 +65,68 @@ main = do
   hSetBuffering stdout LineBuffering
   hSetBuffering stderr LineBuffering
   input <- escalateAs (FatalError . toS) . Aeson.eitherDecode . toS =<< getContents
-  CachixWebsocket.runForever (CachixWebsocket.websocketOptions input) (handleMessage input)
+  -- ASK: why is the deployment binary receiving messages here? Could the agent provide all of the information?
+  CachixWebsocket.runForever (CachixWebsocket.websocketOptions input) $
+    \payload logger connection _agentState agentToken ->
+      runReaderT (deploy (handleMessage payload)) $
+        Env {input = input, connection = connection, logger = logger, agentToken = agentToken}
 
-handleMessage :: CachixWebsocket.Input -> ByteString -> (K.KatipContextT IO () -> IO ()) -> WS.Connection -> CachixWebsocket.AgentState -> ByteString -> K.KatipContextT IO ()
-handleMessage input payload runKatip connection _ agentToken =
-  CachixWebsocket.parseMessage payload (handleCommand . WSS.command)
-  where
-    deploymentDetails = CachixWebsocket.deploymentDetails input
-    options = CachixWebsocket.websocketOptions input
-    handleCommand :: WSS.BackendCommand -> K.KatipContextT IO ()
-    handleCommand (WSS.Deployment _) =
-      K.logLocM K.ErrorS "cachix-deployment should have never gotten a deployment command directly."
-    handleCommand (WSS.AgentRegistered agentInformation) = do
-      queue <- liftIO $ atomically TQueue.newTQueue
-      let deploymentID = WSS.id (deploymentDetails :: WSS.DeploymentDetails)
-          streamingThread = runLogStreaming (toS $ CachixWebsocket.host options) (CachixWebsocket.headers options agentToken) queue deploymentID
-          activateThread = runKatip $ do
-            Activate.activate options connection (Conduit.sinkTQueue queue) deploymentDetails agentInformation agentToken
-      liftIO $ Async.race_ streamingThread activateThread
-      throwIO ExitSuccess
-    runLogStreaming :: String -> RequestHeaders -> Conduit.TQueue ByteString -> UUID -> IO ()
-    runLogStreaming host headers queue deploymentID = do
-      let path = "/api/v1/deploy/log/" <> UUID.toText deploymentID
-      retryAllWithLogging endlessRetryPolicy (CachixWebsocket.logger runKatip) $ do
-        liftIO $
-          Wuss.runSecureClientWith host 443 (toS path) WS.defaultConnectionOptions headers $
-            \conn ->
-              bracket_ (return ()) (WS.sendClose connection ("Closing." :: ByteString)) $
-                Conduit.runConduit $
-                  Conduit.sourceTQueue queue
-                    .| Conduit.linesUnboundedAscii
-                    -- TODO: prepend katip-like format to each line
-                    -- .| (if CachixWebsocket.isVerbose options then Conduit.print else mempty)
-                    .| sendLog conn
+handleMessage ::
+  ByteString ->
+  CachixDeployer ()
+handleMessage payload =
+  -- CachixWebsocket.parseMessage payload (handleCommand . WSS.command)
+  case WSS.parseMessage payload of
+    Left err ->
+      -- TODO: show the bytestring?
+      K.logLocM K.ErrorS $ K.ls $ "Failed to parse websocket payload: " <> err
+    Right message ->
+      handleCommand (WSS.command message)
+
+handleCommand :: WSS.BackendCommand -> CachixDeployer ()
+handleCommand (WSS.Deployment _) =
+  -- TODO: Should the deployment binary be doing this? Isn’t the job of the agent?
+  K.logLocM K.ErrorS "cachix-deployment should have never gotten a deployment command directly."
+handleCommand (WSS.AgentRegistered agentInformation) = do
+  queue <- liftIO $ atomically TMQueue.newTMQueue
+  env@Env {..} <- ask
+  let CachixWebsocket.Input {..} = input
+      deploymentID = WSS.id (deploymentDetails :: WSS.DeploymentDetails)
+      streamingThread =
+        runLogStreaming env (toS $ CachixWebsocket.host websocketOptions) (CachixWebsocket.headers websocketOptions agentToken) queue deploymentID
+      activateThread =
+        logger (Activate.activate websocketOptions connection (Conduit.sinkTMQueue queue) deploymentDetails agentInformation agentToken)
+          `finally` atomically (TMQueue.closeTMQueue queue)
+
+  -- TODO: replace with concurrently_
+  -- TODO: close the TQueue from the activation thread
+  liftIO $ Async.concurrently_ activateThread streamingThread
+  throwIO ExitSuccess
+
+-- Logging
+
+runLogStreaming :: Env -> String -> RequestHeaders -> TMQueue.TMQueue ByteString -> UUID -> IO ()
+runLogStreaming Env {..} host headers queue deploymentID = do
+  let path = "/api/v1/deploy/log/" <> UUID.toText deploymentID
+  retryAllWithLogging endlessRetryPolicy (CachixWebsocket.logger logger) $ do
+    liftIO $
+      Wuss.runSecureClientWith host 443 (toS path) WS.defaultConnectionOptions headers $
+        \conn ->
+          -- ASK: why is the logging thread closing the original connection?
+          -- bracket_ (return ()) (WS.sendClose connection ("Closing." :: ByteString)) $
+          Conduit.runConduit $
+            Conduit.sourceTMQueue queue
+              .| Conduit.linesUnboundedAscii
+              -- TODO: prepend katip-like format to each line
+              -- .| (if CachixWebsocket.isVerbose options then Conduit.print else mempty)
+              .| sendLog conn
 
 sendLog :: WS.Connection -> Conduit.ConduitT ByteString Conduit.Void IO ()
-sendLog connection = Conduit.mapM_ f
-  where
-    f = \bs -> do
-      now <- getCurrentTime
-      WS.sendTextData connection $ Aeson.encode $ WSS.Log {WSS.line = toS bs, WSS.time = now}
+sendLog connection = Conduit.mapM_ $ \bs -> do
+  now <- getCurrentTime
+  WS.sendTextData connection $
+    Aeson.encode $
+      WSS.Log
+        { WSS.line = toS bs,
+          WSS.time = now
+        }

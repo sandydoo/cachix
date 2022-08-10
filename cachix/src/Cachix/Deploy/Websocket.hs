@@ -18,6 +18,8 @@ import Protolude.Conv
 import System.Environment (getEnv)
 import qualified Wuss
 
+data WebSocket = WebSocket {}
+
 type AgentState = IORef (Maybe WSS.AgentInformation)
 
 data Options = Options
@@ -35,7 +37,18 @@ data Input = Input
   }
   deriving (Show, Generic, ToJSON, FromJSON)
 
-runForever :: Options -> (ByteString -> (K.KatipContextT IO () -> IO ()) -> WS.Connection -> AgentState -> ByteString -> K.KatipContextT IO ()) -> IO ()
+runForever ::
+  Options ->
+  ( ByteString ->
+    ( K.KatipContextT IO () ->
+      IO ()
+    ) ->
+    WS.Connection ->
+    AgentState ->
+    ByteString ->
+    K.KatipContextT IO ()
+  ) ->
+  IO ()
 runForever options cmd = withKatip (isVerbose options) $ \logEnv -> do
   agentToken <- getEnv "CACHIX_AGENT_TOKEN"
   -- TODO: error if token is missing
@@ -96,14 +109,14 @@ withKatip isVerbose =
       stdoutScribe <- K.mkHandleScribe K.ColorIfTerminal stdout (K.permitItem permit) K.V2
       K.registerScribe "stdout" stdoutScribe K.defaultScribeSettings logEnv
 
-parseMessage :: FromJSON cmd => ByteString -> (WSS.Message cmd -> K.KatipContextT IO ()) -> K.KatipContextT IO ()
-parseMessage payload m = do
-  case WSS.parseMessage payload of
-    (Left err) ->
-      -- TODO: show the bytestring?
-      K.logLocM K.ErrorS $ K.ls $ "Failed to parse websocket payload: " <> err
-    (Right message) ->
-      m message
+-- parseMessage :: (FromJSON cmd, K.KatipContext m) => ByteString -> (WSS.Message cmd -> m ()) -> m ()
+-- parseMessage payload m = do
+--   case WSS.parseMessage payload of
+--     (Left err) ->
+--       -- TODO: show the bytestring?
+--       K.logLocM K.ErrorS $ K.ls $ "Failed to parse websocket payload: " <> err
+--     (Right message) ->
+--       m message
 
 -- commands
 
