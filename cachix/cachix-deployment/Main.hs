@@ -78,5 +78,6 @@ sendLog :: WS.Connection -> Conduit.ConduitT ByteString Conduit.Void IO ()
 sendLog connection = Conduit.mapM_ f
   where
     f = \bs -> do
+      threadDelay (1 * 1000 * 1000)
       now <- getCurrentTime
       WS.sendTextData connection $ Aeson.encode $ WSS.Log {WSS.line = toS bs, WSS.time = now}
