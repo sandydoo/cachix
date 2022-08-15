@@ -16,6 +16,7 @@ import Cachix.Client.CNix (filterInvalidStorePath)
 import qualified Cachix.Client.Push as Push
 import Cachix.Client.Retry (retryAll)
 import Control.Concurrent.Async
+import Control.Concurrent.Extra (once)
 import Control.Concurrent.STM (TVar, modifyTVar', newTVarIO, readTVar)
 import qualified Control.Concurrent.STM.Lock as Lock
 import qualified Control.Concurrent.STM.TBQueue as TBQueue
@@ -100,11 +101,12 @@ queryLoop workerState pushqueue pushParams = do
   queryLoop (workerState {alreadyQueued = S.union missingStorePathsSet alreadyQueuedSet}) pushqueue pushParams
 
 exitOnceQueueIsEmpty :: IO () -> Async () -> Async () -> QueryWorkerState -> PushWorkerState -> IO ()
-exitOnceQueueIsEmpty stopProducerCallback pushWorker queryWorker queryWorkerState pushWorkerState = do
-  putTextError "Stopped watching /nix/store and waiting for queue to empty ..."
-  Systemd.notifyStopping
-  stopProducerCallback
-  go
+exitOnceQueueIsEmpty stopProducerCallback pushWorker queryWorker queryWorkerState pushWorkerState =
+  join . once $ do
+    putTextError "Stopped watching /nix/store and waiting for queue to empty ..."
+    Systemd.notifyStopping
+    stopProducerCallback
+    go
   where
     go = do
       (isDone, inprogress, queueLength) <- atomically $ do
