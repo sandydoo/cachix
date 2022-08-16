@@ -1,3 +1,6 @@
+{-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE RecordWildCards #-}
+
 {- Implements a queue with the following properties:
 
 - waits for queue to be fully pushed when exiting using ctrl-c (SIGINT)
@@ -40,17 +43,17 @@ data QueryWorkerState = QueryWorkerState
   }
 
 worker :: Push.PushParams IO () -> PushWorkerState -> IO ()
-worker pushParams workerState = forever $ do
-  storePath <- atomically $ TBQueue.readTBQueue $ pushQueue workerState
-  bracket_ (inProgresModify (+ 1)) (inProgresModify (\x -> x - 1)) $
+worker pushParams PushWorkerState {pushQueue, inProgress} = forever $ do
+  storePath <- atomically $ TBQueue.readTBQueue pushQueue
+  bracket_ (inProgressModify (+ 1)) (inProgressModify (\x -> x - 1)) $
     retryAll $
-      \retrystatus ->
-        void $ do
-          maybeStorePath <- filterInvalidStorePath (Push.pushParamsStore pushParams) storePath
-          for maybeStorePath $ \validatedStorePath -> Push.uploadStorePath pushParams validatedStorePath retrystatus
+      \retrystatus -> do
+        maybeStorePath <- filterInvalidStorePath (Push.pushParamsStore pushParams) storePath
+        for_ maybeStorePath $ \validatedStorePath ->
+          Push.uploadStorePath pushParams validatedStorePath retrystatus
   where
-    inProgresModify f =
-      atomically $ modifyTVar' (inProgress workerState) f
+    inProgressModify f =
+      atomically $ modifyTVar' inProgress f
 
 -- NOTE: producer is responsible for signaling SIGINT upon termination
 -- NOTE: producer should return an `IO ()` that should be a blocking operation for terminating it
@@ -104,29 +107,29 @@ exitOnceQueueIsEmpty :: IO () -> Async () -> Async () -> QueryWorkerState -> Pus
 exitOnceQueueIsEmpty stopProducerCallback pushWorker queryWorker queryWorkerState pushWorkerState =
   join . once $ do
     putTextError "Stopped watching /nix/store and waiting for queue to empty ..."
-    Systemd.notifyStopping
+    void Systemd.notifyStopping
     stopProducerCallback
-    go
-  where
-    go = do
-      (isDone, inprogress, queueLength) <- atomically $ do
-        pushQueueLength <- TBQueue.lengthTBQueue $ pushQueue pushWorkerState
-        queryQueueLength <- TBQueue.lengthTBQueue $ queryQueue queryWorkerState
-        inprogress <- readTVar $ inProgress pushWorkerState
-        isLocked <- Lock.locked (lock queryWorkerState)
-        let isDone = pushQueueLength == 0 && queryQueueLength == 0 && inprogress == 0 && not isLocked
-        return (isDone, inprogress, pushQueueLength)
-      if isDone
-        then do
-          putTextError "Done."
-          cancelWith queryWorker StopWorker
-          cancelWith pushWorker StopWorker
-        else do
-          -- extend shutdown for another 90s
-          Systemd.notify False $ "EXTEND_TIMEOUT_USEC=" <> show (90 * 1000 * 1000)
-          putTextError $ "Waiting to finish: " <> show inprogress <> " pushing, " <> show queueLength <> " in queue"
-          threadDelay (1000 * 1000)
-          go
+    waitForQueueToEmpty queryWorkerState pushWorkerState
+    cancelWith queryWorker StopWorker
+    cancelWith pushWorker StopWorker
+    putTextError "Done."
+
+waitForQueueToEmpty :: QueryWorkerState -> PushWorkerState -> IO ()
+waitForQueueToEmpty QueryWorkerState {..} PushWorkerState {..} =
+  fix $ \checkAgain -> do
+    (isDone, inprogress, queueLength) <- atomically $ do
+      pushQueueLength <- TBQueue.lengthTBQueue pushQueue
+      queryQueueLength <- TBQueue.lengthTBQueue queryQueue
+      inprogress <- readTVar inProgress
+      isLocked <- Lock.locked lock
+      let isDone = pushQueueLength == 0 && queryQueueLength == 0 && inprogress == 0 && not isLocked
+      return (isDone, inprogress, pushQueueLength)
+    unless isDone $ do
+      -- extend shutdown for another 90s
+      void $ Systemd.notify False $ "EXTEND_TIMEOUT_USEC=" <> show (90 * 1000 * 1000 :: Integer)
+      putTextError $ "Waiting to finish: " <> show inprogress <> " pushing, " <> show queueLength <> " in queue"
+      threadDelay (1000 * 1000)
+      checkAgain
 
 putTextError :: Text -> IO ()
 putTextError = hPutStrLn stderr
