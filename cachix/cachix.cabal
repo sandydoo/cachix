@@ -131,7 +131,6 @@ library
     , text
     , time
     , unix
-    , unliftio
     , unordered-containers
     , uri-bytestring
     , uuid
