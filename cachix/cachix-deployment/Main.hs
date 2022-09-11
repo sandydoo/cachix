@@ -20,6 +20,7 @@ import Data.Conduit ((.|))
 import qualified Data.Conduit as Conduit
 import qualified Data.Conduit.Combinators as Conduit
 import qualified Data.Conduit.TQueue as Conduit
+import Data.IORef
 import Data.Time.Clock (getCurrentTime)
 import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
@@ -69,12 +70,13 @@ main = do
 
   Log.withLog logOptions $ \withLog -> do
     void . Lock.withTryLock profileName $ do
+      backendWebSocket <- newIORef Nothing
       backendQueue <- atomically TMQueue.newTMQueue
       logQueue <- atomically TMQueue.newTMQueue
 
       Async.withAsync (streamLog withLog host logPath (WebSocket.headers websocketOptions) logQueue) $ \logThread ->
-        Async.withAsync (connectToBackend withLog websocketOptions agentInformation backendQueue) $ \backendThread ->
-          deploy withLog deployment websocketOptions backendQueue (Conduit.sinkTMQueue logQueue)
+        Async.withAsync (connectToBackend withLog websocketOptions agentInformation backendWebSocket backendQueue) $ \backendThread ->
+          deploy withLog deployment backendWebSocket backendQueue (Conduit.sinkTMQueue logQueue)
             `finally` do
               withLog $ K.logLocM K.DebugS $ K.ls ("Cleaning up websocket connections" :: Text)
               atomically $ do
@@ -88,13 +90,17 @@ connectToBackend ::
   Log.WithLog ->
   WebSocket.Options ->
   WSS.AgentInformation ->
+  IORef (Maybe WebSocket.WebSocket) ->
   TMQueue.TMQueue WSS.AgentCommand ->
   IO ()
-connectToBackend withLog websocketOptions agentInformation backendQueue =
-  WebSocket.withConnection withLog websocketOptions $ \WebSocket.WebSocket {connection} -> do
-    Conduit.runConduit $
-      Conduit.sourceTMQueue backendQueue
-        .| Conduit.mapM_ (sendMessage connection)
+connectToBackend withLog websocketOptions agentInformation socket backendQueue =
+  WebSocket.withConnection withLog websocketOptions $ \websocket -> do
+    let connection = WebSocket.connection websocket
+    atomicWriteIORef socket (Just websocket)
+    WSS.receiveDataConcurrently connection $ \_ ->
+      Conduit.runConduit $
+        Conduit.sourceTMQueue backendQueue
+          .| Conduit.mapM_ (sendMessage connection)
   where
     sendMessage :: WS.Connection -> WSS.AgentCommand -> IO ()
     sendMessage connection cmd = do
@@ -123,14 +129,13 @@ deploy ::
   Log.WithLog ->
   -- | Deployment information passed from the agent
   Agent.Deployment ->
-  -- | Websocket options
-  WebSocket.Options ->
+  IORef (Maybe WebSocket.WebSocket) ->
   -- | Message queue for the backend websocket connection
   TMQueue.TMQueue WSS.AgentCommand ->
   -- | Logging Websocket connection
   Log.LogStream ->
   IO ()
-deploy withLog deployment websocketOptions backendQueue logStream = do
+deploy withLog deployment backendWebSocket backendQueue logStream = do
   withLog $ K.logLocM K.InfoS $ K.ls $ "Deploying #" <> deploymentIndex <> ": " <> storePath
 
   deploymentStatus <- Safe.tryIO $
@@ -139,7 +144,7 @@ deploy withLog deployment websocketOptions backendQueue logStream = do
 
       Activate.downloadStorePaths logStream deploymentDetails cacheArgs
 
-      -- Try to get the closure size now that everything is downloaded
+      -- Try to get the closure size now that everything has been downloaded
       --
       -- TODO: query the remote store to get the size before downloading (and
       -- possibly running out of disk space)
@@ -149,36 +154,28 @@ deploy withLog deployment websocketOptions backendQueue logStream = do
       rollbackAction <- Activate.activate logStream profileName (toS storePath)
 
       -- Run network test
+      lastPong <- Timeout.timeout (10 * 1000 * 1000) $ do
+        maybeSocket <- readIORef backendWebSocket
+        case maybeSocket of
+          Just websocket ->
+            Async.withAsync (WebSocket.sendPingEvery 1 websocket) (\_ -> WebSocket.pollForPong websocket)
 
-      case WSS.rollbackScript deploymentDetails of
-        Nothing -> pure ()
-        Just rollbackScript -> do
-          Log.streamLine logStream "Running rollback script."
-          rollbackScriptResult <- Activate.runShellWithExitCode logStream (toS rollbackScript) []
+      when (isNothing lastPong) $
+        case WSS.rollbackScript deploymentDetails of
+          Nothing -> pure ()
+          Just rollbackScript -> do
+            Log.streamLine logStream "Running rollback script."
+            rollbackScriptResult <- Activate.runShellWithExitCode logStream (toS rollbackScript) []
 
-          case rollbackScriptResult of
-            ExitSuccess -> return ()
-            ExitFailure _ ->
-              case rollbackAction of
-                Just rollback -> do
-                  Log.streamLine logStream "Deployment failed, rolling back ..."
-                  rollback
-                Nothing ->
-                  Log.streamLine logStream "Skipping rollback as this is the first deployment."
-
-  -- TODO: Test network, run rollback script, and optionally trigger rollback
-  -- Send ping and wait for reply concurrently. Timeout.
-  -- Async.withAsync (forever $ WS.sendPing connection >> threadDelay (1 * 1000 * 1000)) $ \_ -> do
-  --   response <- WS.receive connection
-  --   case response of
-  --     WS.Pin
-  -- let waitForPing = Nothing
-  -- case waitForPing of
-  --   Nothing -> Activate.rollback logStream profileName deploymentDetails
-  --   Just () -> do
-  --     case WSS.rollbackScript deploymentDetails of
-  --       Just script -> return ()
-  --       Nothing -> return ()
+            case rollbackScriptResult of
+              ExitSuccess -> return ()
+              ExitFailure _ ->
+                case rollbackAction of
+                  Just rollback -> do
+                    Log.streamLine logStream "Deployment failed, rolling back ..."
+                    rollback
+                  Nothing ->
+                    Log.streamLine logStream "Skipping rollback as this is the first deployment."
 
   case deploymentStatus of
     Left _ -> do
@@ -198,13 +195,10 @@ deploy withLog deployment websocketOptions backendQueue logStream = do
     deploymentDetails = Agent.deploymentDetails deployment
     deploymentID = WSS.id (deploymentDetails :: WSS.DeploymentDetails)
     deploymentIndex = show $ WSS.index deploymentDetails
+    host = Agent.host deployment
     profileName = Agent.profileName deployment
     agentToken = Agent.agentToken deployment
     agentInformation = Agent.agentInformation deployment
-
-    -- WebSocket options
-
-    host = WebSocket.host websocketOptions
 
     startDeployment :: Maybe Int64 -> IO ()
     startDeployment closureSize = do

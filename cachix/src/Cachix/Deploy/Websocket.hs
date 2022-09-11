@@ -10,7 +10,10 @@ import qualified Cachix.Deploy.WebsocketPong as WebsocketPong
 import Control.Exception.Safe (Handler (..), MonadMask, isSyncException)
 import qualified Control.Exception.Safe as Safe
 import qualified Control.Retry as Retry
+import qualified Data.ByteString as BS
+import Data.IORef
 import Data.String (String)
+import qualified Data.Time.Clock as Time
 import qualified Katip as K
 import qualified Network.HTTP.Simple as HTTP
 import qualified Network.WebSockets as WS
@@ -113,8 +116,23 @@ reconnectWithLog withLog inner =
     toSeconds t =
       floor $ (fromIntegral t :: Double) / 1000 / 1000
 
-waitForPong :: IO ()
-waitForPong = undefined
+pollForPong :: WebSocket -> IO Time.UTCTime
+pollForPong WebSocket {pongState} = do
+  now <- Time.getCurrentTime
+  loop now
+  where
+    loop now = do
+      lastPong <- readIORef pongState
+      if lastPong > now
+        then pure lastPong
+        else do
+          threadDelay (500 * 1000)
+          loop now
+
+sendPingEvery :: Int -> WebSocket -> IO ()
+sendPingEvery seconds WebSocket {connection} = forever $ do
+  WS.sendPing connection BS.empty
+  threadDelay (seconds * 1000 * 1000)
 
 -- | Try to gracefully close the WebSocket.
 --
