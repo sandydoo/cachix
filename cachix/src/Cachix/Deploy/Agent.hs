@@ -66,7 +66,7 @@ run cachixOptions agentOpts =
                 WebSocket.agentIdentifier = agentIdentifier agentName
               }
 
-      WebSocket.withConnection withLog websocketOptions $ \connection ->
+      WebSocket.withConnection withLog websocketOptions $ \WebSocket.WebSocket {connection} ->
         WSS.receiveDataConcurrently connection $ \message ->
           handleMessage withLog agentState agentName agentToken message
   where

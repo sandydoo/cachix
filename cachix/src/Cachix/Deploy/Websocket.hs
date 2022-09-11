@@ -20,6 +20,11 @@ import qualified System.Info
 import qualified System.Timeout as Timeout
 import qualified Wuss
 
+data WebSocket = WebSocket
+  { connection :: WS.Connection,
+    pongState :: WebsocketPong.LastPongState
+  }
+
 data Options = Options
   { host :: Text,
     path :: Text,
@@ -39,7 +44,7 @@ withConnection ::
   -- | WebSocket options
   Options ->
   -- | The app to run inside the socket
-  WS.ClientApp () ->
+  (WebSocket -> IO ()) ->
   IO ()
 withConnection withLog options app = do
   mainThreadID <- myThreadId
@@ -66,7 +71,7 @@ withConnection withLog options app = do
         do
           withLog $ K.logLocM K.InfoS "Connected to Cachix Deploy service"
           WS.withPingThread connection pingEvery pingHandler $
-            app connection
+            app WebSocket {connection, pongState}
           `finally` waitForGracefulShutdown connection
 
 -- Log all exceptions and retry, except when the websocket receives a close request.
@@ -107,6 +112,9 @@ reconnectWithLog withLog inner =
     toSeconds :: Int -> Int
     toSeconds t =
       floor $ (fromIntegral t :: Double) / 1000 / 1000
+
+waitForPong :: IO ()
+waitForPong = undefined
 
 -- | Try to gracefully close the WebSocket.
 --

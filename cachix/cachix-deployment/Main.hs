@@ -1,5 +1,4 @@
 {-# LANGUAGE DuplicateRecordFields #-}
-{-# LANGUAGE NamedFieldPuns #-}
 
 module Main
   ( main,
@@ -92,7 +91,7 @@ connectToBackend ::
   TMQueue.TMQueue WSS.AgentCommand ->
   IO ()
 connectToBackend withLog websocketOptions agentInformation backendQueue =
-  WebSocket.withConnection withLog websocketOptions $ \connection -> do
+  WebSocket.withConnection withLog websocketOptions $ \WebSocket.WebSocket {connection} -> do
     Conduit.runConduit $
       Conduit.sourceTMQueue backendQueue
         .| Conduit.mapM_ (sendMessage connection)
@@ -136,13 +135,50 @@ deploy withLog deployment websocketOptions backendQueue logStream = do
 
   deploymentStatus <- Safe.tryIO $
     Activate.withCacheArgs host agentInformation agentToken $ \cacheArgs -> do
-      -- TODO: what if this fails
-      closureSize <- fromRight Nothing <$> Activate.getClosureSize cacheArgs storePath
-      startDeployment closureSize
+      startDeployment Nothing
 
-      Activate.activate logStream profileName deploymentDetails cacheArgs
+      Activate.downloadStorePaths logStream deploymentDetails cacheArgs
+
+      -- Try to get the closure size now that everything is downloaded
+      --
+      -- TODO: query the remote store to get the size before downloading (and
+      -- possibly running out of disk space)
+      closureSize <- fromRight Nothing <$> Activate.getClosureSize cacheArgs storePath
+      when (isJust closureSize) $ startDeployment closureSize
+
+      rollbackAction <- Activate.activate logStream profileName (toS storePath)
+
+      -- Run network test
+
+      case WSS.rollbackScript deploymentDetails of
+        Nothing -> pure ()
+        Just rollbackScript -> do
+          Log.streamLine logStream "Running rollback script."
+          rollbackScriptResult <- Activate.runShellWithExitCode logStream (toS rollbackScript) []
+
+          case rollbackScriptResult of
+            ExitSuccess -> return ()
+            ExitFailure _ ->
+              case rollbackAction of
+                Just rollback -> do
+                  Log.streamLine logStream "Deployment failed, rolling back ..."
+                  rollback
+                Nothing ->
+                  Log.streamLine logStream "Skipping rollback as this is the first deployment."
 
   -- TODO: Test network, run rollback script, and optionally trigger rollback
+  -- Send ping and wait for reply concurrently. Timeout.
+  -- Async.withAsync (forever $ WS.sendPing connection >> threadDelay (1 * 1000 * 1000)) $ \_ -> do
+  --   response <- WS.receive connection
+  --   case response of
+  --     WS.Pin
+  -- let waitForPing = Nothing
+  -- case waitForPing of
+  --   Nothing -> Activate.rollback logStream profileName deploymentDetails
+  --   Just () -> do
+  --     case WSS.rollbackScript deploymentDetails of
+  --       Just script -> return ()
+  --       Nothing -> return ()
 
   case deploymentStatus of
     Left _ -> do
