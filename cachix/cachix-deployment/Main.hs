@@ -13,6 +13,7 @@ import qualified Cachix.Deploy.Lock as Lock
 import qualified Cachix.Deploy.Log as Log
 import qualified Cachix.Deploy.Websocket as WebSocket
 import qualified Control.Concurrent.Async as Async
+import qualified Control.Concurrent.MVar as MVar
 import qualified Control.Concurrent.STM.TMQueue as TMQueue
 import qualified Control.Exception.Safe as Safe
 import qualified Data.Aeson as Aeson
@@ -20,7 +21,6 @@ import Data.Conduit ((.|))
 import qualified Data.Conduit as Conduit
 import qualified Data.Conduit.Combinators as Conduit
 import qualified Data.Conduit.TQueue as Conduit
-import Data.IORef
 import Data.Time.Clock (getCurrentTime)
 import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as UUID
@@ -31,15 +31,12 @@ import qualified Network.WebSockets as WS
 import Protolude hiding (toS)
 import Protolude.Conv
 import System.IO (BufferMode (..), hSetBuffering)
-import qualified System.Timeout as Timeout
 import qualified Wuss
 
 -- | Activate the new deployment.
 --
 -- If the target profile is already locked by another deployment, exit
 -- immediately and rely on the backend to reschedule.
---
--- TODO: what if websocket gets closed while deploying?
 main :: IO ()
 main = do
   setLocaleEncoding utf8
@@ -68,44 +65,50 @@ main = do
             WebSocket.agentIdentifier = Agent.agentIdentifier agentName
           }
 
-  Log.withLog logOptions $ \withLog -> do
+  Log.withLog logOptions $ \withLog ->
     void . Lock.withTryLock profileName $ do
-      backendWebSocket <- newIORef Nothing
-      backendQueue <- atomically TMQueue.newTMQueue
-      logQueue <- atomically TMQueue.newTMQueue
+      -- Open a connection to logging stream
+      (logQueue, loggingThread) <- runLogStream withLog host logPath (WebSocket.headers websocketOptions)
 
-      Async.withAsync (streamLog withLog host logPath (WebSocket.headers websocketOptions) logQueue) $ \logThread ->
-        Async.withAsync (connectToBackend withLog websocketOptions agentInformation backendWebSocket backendQueue) $ \backendThread ->
-          deploy withLog deployment backendWebSocket backendQueue (Conduit.sinkTMQueue logQueue)
-            `finally` do
-              withLog $ K.logLocM K.DebugS $ K.ls ("Cleaning up websocket connections" :: Text)
-              atomically $ do
-                TMQueue.closeTMQueue logQueue
-                TMQueue.closeTMQueue backendQueue
-              Async.waitBoth logThread backendThread
+      -- Open a connection to Cachix and block until it's ready.
+      (service, serviceThread) <- connectToService withLog websocketOptions agentInformation
 
--- | Maintain a websocket connection to the backend for sending deployment
+      deploy withLog deployment service (Conduit.sinkTMQueue logQueue)
+        `finally` do
+          withLog $ K.logLocM K.DebugS $ K.ls ("Cleaning up websocket connections" :: Text)
+          atomically $ TMQueue.closeTMQueue logQueue
+          WebSocket.close service
+          Async.waitBoth loggingThread serviceThread
+
+-- | Open and maintain a websocket connection to the backend for sending deployment
 -- progress updates.
-connectToBackend ::
+connectToService ::
   Log.WithLog ->
   WebSocket.Options ->
   WSS.AgentInformation ->
-  IORef (Maybe WebSocket.WebSocket) ->
-  TMQueue.TMQueue WSS.AgentCommand ->
-  IO ()
-connectToBackend withLog websocketOptions agentInformation socket backendQueue =
-  WebSocket.withConnection withLog websocketOptions $ \websocket -> do
-    let connection = WebSocket.connection websocket
-    atomicWriteIORef socket (Just websocket)
-    WSS.receiveDataConcurrently connection $ \_ ->
-      Conduit.runConduit $
-        Conduit.sourceTMQueue backendQueue
-          .| Conduit.mapM_ (sendMessage connection)
+  IO (WebSocket.WebSocket WSS.AgentCommand WSS.BackendCommand, Async.Async ())
+connectToService withLog websocketOptions agentInformation = do
+  initialConnection <- MVar.newEmptyMVar
+
+  thread <- Async.async $
+    WebSocket.withConnection withLog websocketOptions $ \websocket ->
+      do
+        MVar.putMVar initialConnection websocket
+        Async.withAsync (WebSocket.consumeIntoVoid websocket) $ \_ ->
+          Conduit.runConduit $
+            Conduit.sourceTBMQueue (WebSocket.tx websocket)
+              .| Conduit.mapM_ (sendMessage websocket)
+
+  -- Block until the connection has been established
+  websocket <- MVar.readMVar initialConnection
+
+  return (websocket, thread)
   where
-    sendMessage :: WS.Connection -> WSS.AgentCommand -> IO ()
-    sendMessage connection cmd = do
-      command <- createMessage cmd
-      WSS.sendMessage connection command
+    sendMessage :: WebSocket.WebSocket WSS.AgentCommand WSS.BackendCommand -> WebSocket.Message WSS.AgentCommand -> IO ()
+    sendMessage WebSocket.WebSocket {connection} (WebSocket.DataMessage msg) = do
+      command <- createMessage msg
+      activeConnection <- MVar.readMVar connection
+      WS.sendTextData activeConnection $ Aeson.encode command
 
     createMessage :: WSS.AgentCommand -> IO (WSS.Message WSS.AgentCommand)
     createMessage command = do
@@ -129,22 +132,22 @@ deploy ::
   Log.WithLog ->
   -- | Deployment information passed from the agent
   Agent.Deployment ->
-  IORef (Maybe WebSocket.WebSocket) ->
-  -- | Message queue for the backend websocket connection
-  TMQueue.TMQueue WSS.AgentCommand ->
+  WebSocket.WebSocket WSS.AgentCommand WSS.BackendCommand ->
+  -- WebSocket.Receive WSS.AgentCommand ->
+
   -- | Logging Websocket connection
   Log.LogStream ->
   IO ()
-deploy withLog deployment backendWebSocket backendQueue logStream = do
+deploy withLog deployment service logStream = do
   withLog $ K.logLocM K.InfoS $ K.ls $ "Deploying #" <> deploymentIndex <> ": " <> storePath
 
-  deploymentStatus <- Safe.tryIO $
+  activationStatus <- Safe.tryIO $
     Activate.withCacheArgs host agentInformation agentToken $ \cacheArgs -> do
       startDeployment Nothing
 
       Activate.downloadStorePaths logStream deploymentDetails cacheArgs
 
-      -- Try to get the closure size now that everything has been downloaded
+      -- Read the closure size and report
       --
       -- TODO: query the remote store to get the size before downloading (and
       -- possibly running out of disk space)
@@ -153,39 +156,45 @@ deploy withLog deployment backendWebSocket backendQueue logStream = do
 
       rollbackAction <- Activate.activate logStream profileName (toS storePath)
 
-      -- Run network test
-      lastPong <- Timeout.timeout (10 * 1000 * 1000) $ do
-        maybeSocket <- readIORef backendWebSocket
-        case maybeSocket of
-          Just websocket ->
-            Async.withAsync (WebSocket.sendPingEvery 1 websocket) (\_ -> WebSocket.pollForPong websocket)
+      -- Run tests on the new deployment
+      testResults <- Safe.tryIO $ do
+        -- Run network test
+        pong <- WebSocket.waitForPong 10 service
+        when (isNothing pong) $ throwIO Activate.NetworkTestFailure
 
-      when (isNothing lastPong) $
-        case WSS.rollbackScript deploymentDetails of
-          Nothing -> pure ()
-          Just rollbackScript -> do
-            Log.streamLine logStream "Running rollback script."
-            rollbackScriptResult <- Activate.runShellWithExitCode logStream (toS rollbackScript) []
+        for (WSS.rollbackScript deploymentDetails) $ \rollbackScript -> do
+          Log.streamLine logStream "Running rollback script."
+          rollbackScriptResult <- Safe.tryIO $ Activate.runShellWithExitCode logStream (toS rollbackScript) []
+          case rollbackScriptResult of
+            Left e -> throwIO (Activate.RollbackScriptFailure e)
+            Right exitCode ->
+              case exitCode of
+                ExitSuccess -> pure ()
+                ExitFailure _ -> throwIO Activate.RollbackFailure
 
-            case rollbackScriptResult of
-              ExitSuccess -> return ()
-              ExitFailure _ ->
-                case rollbackAction of
-                  Just rollback -> do
-                    Log.streamLine logStream "Deployment failed, rolling back ..."
-                    rollback
-                  Nothing ->
-                    Log.streamLine logStream "Skipping rollback as this is the first deployment."
+      -- Roll back if any of the tests have failed
+      when (isLeft testResults) $
+        case rollbackAction of
+          Just rollback -> do
+            Log.streamLine logStream "Deployment failed, rolling back ..."
+            rollback
+          Nothing ->
+            Log.streamLine logStream "Skipping rollback as this is the first deployment."
 
-  case deploymentStatus of
-    Left _ -> do
-      Log.streamLine logStream "Failed to activate the deployment."
+  case activationStatus of
+    Left e -> do
+      Log.streamLine logStream $
+        toS $
+          unwords
+            [ "Failed to activate the deployment.",
+              toS $ displayException e
+            ]
       withLog $ K.logLocM K.InfoS $ K.ls $ "Deploying #" <> deploymentIndex <> " failed."
     Right _ -> do
       Log.streamLine logStream "Successfully activated the deployment."
       withLog $ K.logLocM K.InfoS $ K.ls $ "Deployment #" <> deploymentIndex <> " finished"
 
-  endDeployment (isRight deploymentStatus)
+  endDeployment (isRight activationStatus)
   where
     -- TODO: cut down record access boilerplate
 
@@ -203,8 +212,8 @@ deploy withLog deployment backendWebSocket backendQueue logStream = do
     startDeployment :: Maybe Int64 -> IO ()
     startDeployment closureSize = do
       now <- getCurrentTime
-      atomically $
-        TMQueue.writeTMQueue backendQueue $
+      WebSocket.send service $
+        WebSocket.DataMessage $
           WSS.DeploymentStarted
             { WSS.id = deploymentID,
               WSS.time = now,
@@ -214,8 +223,8 @@ deploy withLog deployment backendWebSocket backendQueue logStream = do
     endDeployment :: Bool -> IO ()
     endDeployment hasSucceeded = do
       now <- getCurrentTime
-      atomically $
-        TMQueue.writeTMQueue backendQueue $
+      WebSocket.send service $
+        WebSocket.DataMessage $
           WSS.DeploymentFinished
             { WSS.id = deploymentID,
               WSS.time = now,
@@ -225,7 +234,8 @@ deploy withLog deployment backendWebSocket backendQueue logStream = do
 -- Log
 
 -- TODO: prepend katip-like format to each line
-streamLog ::
+-- TODO: use the WebSocket module here (without ping?)
+runLogStream ::
   -- | Logging context
   Log.WithLog ->
   -- | Host
@@ -234,11 +244,13 @@ streamLog ::
   Text ->
   -- | HTTP headers
   HTTP.RequestHeaders ->
-  -- | Queue of messages to stream
-  TMQueue.TMQueue ByteString ->
-  IO ()
-streamLog withLog host path headers queue = do
-  WebSocket.reconnectWithLog withLog $
-    Wuss.runSecureClientWith (toS host) 443 (toS path) WS.defaultConnectionOptions headers $ \connection ->
-      Log.streamLog withLog connection queue
-        `finally` WebSocket.waitForGracefulShutdown connection
+  -- | Returns a queue for writing messages and the thread handle
+  IO (TMQueue.TMQueue ByteString, Async.Async ())
+runLogStream withLog host path headers = do
+  queue <- TMQueue.newTMQueueIO
+  thread <- Async.async $
+    WebSocket.reconnectWithLog withLog $
+      Wuss.runSecureClientWith (toS host) 443 (toS path) WS.defaultConnectionOptions headers $ \connection ->
+        Log.streamLog withLog connection queue
+          `finally` WebSocket.waitForGracefulShutdown connection
+  return (queue, thread)

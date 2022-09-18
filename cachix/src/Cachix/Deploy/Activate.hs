@@ -27,6 +27,17 @@ import System.IO.Temp (withSystemTempDirectory)
 import System.Process
 import Prelude (String, userError)
 
+data Error
+  = NetworkTestFailure
+  | RollbackScriptFailure IOException
+  | RollbackFailure
+  deriving (Show)
+
+instance Exception Error where
+  displayException NetworkTestFailure = "Cannot connect back to Cachix Deploy after activating the new deployment"
+  displayException (RollbackScriptFailure e) = "The rollback script returned an error." <> displayException e
+  displayException RollbackFailure = "Cannot roll back the deployment."
+
 downloadStorePaths ::
   -- | Logging context
   Log.LogStream ->
