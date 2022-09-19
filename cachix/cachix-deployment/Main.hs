@@ -141,7 +141,7 @@ deploy ::
 deploy withLog deployment service logStream = do
   withLog $ K.logLocM K.InfoS $ K.ls $ "Deploying #" <> deploymentIndex <> ": " <> storePath
 
-  activationStatus <- Safe.tryIO $
+  activationStatus <- Safe.tryAny $
     Activate.withCacheArgs host agentInformation agentToken $ \cacheArgs -> do
       startDeployment Nothing
 
@@ -157,7 +157,7 @@ deploy withLog deployment service logStream = do
       rollbackAction <- Activate.activate logStream profileName (toS storePath)
 
       -- Run tests on the new deployment
-      testResults <- Safe.tryIO $ do
+      testResults <- Safe.tryAny $ do
         -- Run network test
         pong <- WebSocket.waitForPong 10 service
         when (isNothing pong) $ throwIO Activate.NetworkTestFailure
