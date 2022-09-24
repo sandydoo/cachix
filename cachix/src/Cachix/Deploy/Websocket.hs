@@ -157,8 +157,10 @@ handleJSONMessages websocket app =
   where
     closeGracefully incomingThread = do
       repsonseToCloseRequest <- startGracePeriod $ do
-        activeConnection <- MVar.readMVar (connection websocket)
-        WS.sendClose activeConnection ("Closing." :: ByteString)
+        MVar.tryReadMVar (connection websocket) >>= \case
+          Just activeConnection ->
+            WS.sendClose activeConnection ("Closing." :: ByteString)
+          Nothing -> pure ()
         _ <- Async.wait incomingThread
         atomically (TMChan.closeTMChan (rx websocket))
 

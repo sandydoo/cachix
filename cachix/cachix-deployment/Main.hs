@@ -92,7 +92,7 @@ connectToService withLog websocketOptions = do
       WebSocket.handleJSONMessages websocket (WebSocket.consumeIntoVoid websocket)
 
   -- Block until the connection has been established
-  websocket <- MVar.readMVar initialConnection
+  websocket <- MVar.takeMVar initialConnection
 
   return (websocket, thread)
 
