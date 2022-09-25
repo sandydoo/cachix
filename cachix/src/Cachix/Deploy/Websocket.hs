@@ -141,6 +141,8 @@ withConnection withLog Options {host, path, headers, agentIdentifier} app = do
               WebsocketPong.pongHandler lastPong
 
               -- Update the connection
+              isEmpty <- MVar.isEmptyMVar connection
+              withLog $ K.logLocM K.DebugS $ K.ls $ "Connection: " <> (show isEmpty :: Text)
               MVar.putMVar connection newConnection
 
               WS.withPingThread newConnection pingEvery pingHandler (app websocket)
