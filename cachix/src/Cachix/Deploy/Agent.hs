@@ -73,10 +73,11 @@ run cachixOptions agentOpts =
       WebSocket.withConnection withLog websocketOptions $ \websocket ->
         WebSocket.handleJSONMessages @(WSS.Message WSS.AgentCommand) @(WSS.Message WSS.BackendCommand) websocket $
           WebSocket.receive websocket >>= \channel ->
-            forever $
+            fix $ \keepReading ->
               WebSocket.read channel >>= \case
                 Just (WebSocket.DataMessage message) -> do
                   handleMessage withLog agentState agentName agentToken message
+                  keepReading
                 _ -> pure ()
   where
     host = toS $ Servant.baseUrlHost $ getBaseUrl $ Config.host cachixOptions

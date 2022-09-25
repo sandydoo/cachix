@@ -149,7 +149,7 @@ withConnection withLog Options {host, path, headers, agentIdentifier} app = do
               MVar.putMVar connection newConnection
 
               WS.withPingThread newConnection pingEvery pingHandler (app websocket)
-        `Safe.finally` dropConnection
+              `Safe.finally` dropConnection
 
 -- Handle JSON messages
 
