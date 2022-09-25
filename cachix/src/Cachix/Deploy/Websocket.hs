@@ -120,7 +120,10 @@ withConnection withLog Options {host, path, headers, agentIdentifier} app = do
   rx <- TMChan.newBroadcastTMChanIO
   let websocket = WebSocket {connection, tx, rx, lastPong, withLog}
 
-  let dropConnection = void $ MVar.tryTakeMVar connection
+  let dropConnection = do
+        withLog $ K.logLocM K.DebugS "Dropping connection"
+        void $ MVar.tryTakeMVar connection
+
   let closeChannels = atomically $ do
         TBMQueue.closeTBMQueue tx
         TMChan.closeTMChan rx
