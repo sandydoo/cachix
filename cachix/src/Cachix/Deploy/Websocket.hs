@@ -47,6 +47,7 @@ data WebSocket tx rx = WebSocket
     tx :: Transmit tx,
     -- | See 'Receive'
     rx :: Receive rx,
+    channels :: MVar.MVar [Receive rx],
     withLog :: Log.WithLog
   }
 
@@ -67,11 +68,25 @@ send WebSocket {tx} = atomically . TBMQueue.writeTBMQueue tx
 
 -- | Open a new receiving channel.
 receive :: WebSocket tx rx -> IO (Receive rx)
-receive WebSocket {rx} = atomically $ TMChan.dupTMChan rx
+receive WebSocket {rx, channels} = do
+  channel <- atomically (TMChan.dupTMChan rx)
+  MVar.modifyMVar_ channels $ \ch ->
+    pure (channel : ch)
+  pure channel
 
 -- | Read incoming messages on a channel opened with 'receive'.
 read :: Receive rx -> IO (Maybe (Message rx))
 read = atomically . TMChan.readTMChan
+
+closeOpenChannels :: WebSocket tx rx -> IO ()
+closeOpenChannels WebSocket {rx, channels} = do
+  atomically (TMChan.closeTMChan rx)
+  openChannels <- MVar.tryTakeMVar channels
+  case openChannels of
+    Just chans ->
+      atomically $
+        for_ chans TMChan.closeTMChan
+    Nothing -> pure ()
 
 -- | Close the outgoing queue.
 drainQueue :: WebSocket tx rx -> IO ()
@@ -82,7 +97,8 @@ shutdownNow websocket@WebSocket {rx} code msg = do
   -- Close the outgoing queue
   drainQueue websocket
   -- Signal to all receivers that the socket is closed
-  atomically (TMChan.closeTMChan rx)
+  -- atomically (TMChan.closeTMChan rx)
+  closeOpenChannels websocket
   throwIO $ WS.CloseRequest code msg
 
 data Options = Options
@@ -116,9 +132,10 @@ withConnection withLog Options {host, path, headers, agentIdentifier} app = do
   let connectionOptions = WebsocketPong.installPongHandler lastPong WS.defaultConnectionOptions
 
   connection <- MVar.newEmptyMVar
+  channels <- MVar.newMVar []
   tx <- TBMQueue.newTBMQueueIO 100
   rx <- TMChan.newBroadcastTMChanIO
-  let websocket = WebSocket {connection, tx, rx, lastPong, withLog}
+  let websocket = WebSocket {connection, tx, rx, channels, lastPong, withLog}
 
   let dropConnection = do
         withLog $ K.logLocM K.DebugS "Dropping connection"
@@ -158,7 +175,7 @@ withConnection withLog Options {host, path, headers, agentIdentifier} app = do
 
 handleJSONMessages :: (Aeson.ToJSON tx, Aeson.FromJSON rx) => Log.WithLog -> WebSocket tx rx -> IO () -> IO ()
 handleJSONMessages withLog websocket app =
-  Async.withAsync (handleIncomingJSON websocket `finally` atomically (TMChan.closeTMChan (rx websocket))) $ \incomingThread ->
+  Async.withAsync (handleIncomingJSON websocket) $ \incomingThread ->
     Async.withAsync (handleOutgoingJSON websocket `finally` closeGracefully incomingThread) $ \outgoingThread -> do
       app
       Async.wait outgoingThread
@@ -173,7 +190,7 @@ handleJSONMessages withLog websocket app =
           Nothing -> pure ()
         _ <- Async.wait incomingThread
         withLog $ K.logLocM K.DebugS $ K.ls ("Received close request. Closing channel." :: Text)
-        atomically (TMChan.closeTMChan (rx websocket))
+        closeOpenChannels websocket
 
       when (isNothing repsonseToCloseRequest) throwNoResponseToCloseRequest
 
