@@ -76,9 +76,12 @@ run cachixOptions agentOpts =
             fix $ \keepReading ->
               WebSocket.read channel >>= \case
                 Just (WebSocket.DataMessage message) -> do
+                  withLog $ K.logLocM K.DebugS "Reading further"
                   handleMessage withLog agentState agentName agentToken message
                   keepReading
-                _ -> pure ()
+                _ -> do
+                  withLog $ K.logLocM K.DebugS "Nothing received by agent"
+                  pure ()
   where
     host = toS $ Servant.baseUrlHost $ getBaseUrl $ Config.host cachixOptions
     profileName = fromMaybe "system" (AgentOptions.profile agentOpts)

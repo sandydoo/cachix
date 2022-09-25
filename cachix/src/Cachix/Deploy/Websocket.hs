@@ -124,9 +124,11 @@ withConnection withLog Options {host, path, headers, agentIdentifier} app = do
         withLog $ K.logLocM K.DebugS "Dropping connection"
         void $ MVar.tryTakeMVar connection
 
-  let closeChannels = atomically $ do
-        TBMQueue.closeTBMQueue tx
-        TMChan.closeTMChan rx
+  let closeChannels = do
+        withLog $ K.logLocM K.DebugS "Closing channels"
+        atomically $ do
+          TBMQueue.closeTBMQueue tx
+          TMChan.closeTMChan rx
 
   flip Safe.finally closeChannels $
     reconnectWithLog withLog $
@@ -154,15 +156,12 @@ withConnection withLog Options {host, path, headers, agentIdentifier} app = do
 -- Handle JSON messages
 
 handleJSONMessages :: (Aeson.ToJSON tx, Aeson.FromJSON rx) => WebSocket tx rx -> IO () -> IO ()
-handleJSONMessages websocket app = handle mvar $
+handleJSONMessages websocket app =
   Async.withAsync (handleIncomingJSON websocket) $ \incomingThread ->
     Async.withAsync (handleOutgoingJSON websocket `finally` closeGracefully incomingThread) $ \outgoingThread -> do
       app
       Async.wait outgoingThread
   where
-    mvar :: BlockedIndefinitelyOnMVar -> IO ()
-    mvar _ = pure ()
-
     closeGracefully incomingThread = do
       repsonseToCloseRequest <- startGracePeriod $ do
         MVar.tryReadMVar (connection websocket) >>= \case
