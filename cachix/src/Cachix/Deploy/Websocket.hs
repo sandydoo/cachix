@@ -150,15 +150,15 @@ withConnection withLog Options {host, path, headers, agentIdentifier} app = do
               withLog $ K.logLocM K.DebugS $ K.ls $ "Connection: " <> (show isEmpty :: Text)
               MVar.putMVar connection newConnection
 
-              -- WS.withPingThread newConnection pingEvery pingHandler (app websocket)
-              Async.withAsync (sendPingEvery pingEvery websocket) $ \_ -> app websocket
+              WS.withPingThread newConnection pingEvery pingHandler (app websocket)
+              -- Async.withAsync (sendPingEvery pingEvery websocket) $ \_ -> app websocket
               `Safe.finally` dropConnection
 
 -- Handle JSON messages
 
 handleJSONMessages :: (Aeson.ToJSON tx, Aeson.FromJSON rx) => Log.WithLog -> WebSocket tx rx -> IO () -> IO ()
 handleJSONMessages withLog websocket app =
-  Async.withAsync (handleIncomingJSON websocket) $ \incomingThread ->
+  Async.withAsync (handleIncomingJSON websocket `finally` atomically (TMChan.closeTMChan (rx websocket))) $ \incomingThread ->
     Async.withAsync (handleOutgoingJSON websocket `finally` closeGracefully incomingThread) $ \outgoingThread -> do
       app
       Async.wait outgoingThread
