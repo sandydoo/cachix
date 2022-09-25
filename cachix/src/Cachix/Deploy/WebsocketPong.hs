@@ -37,7 +37,7 @@ secondsSinceLastPong pong = do
 pongHandler :: LastPongState -> IO ()
 pongHandler pong = do
   now <- getCurrentTime
-  void $ IORef.atomicWriteIORef pong now
+  IORef.writeIORef pong now
 
 installPongHandler :: LastPongState -> WS.ConnectionOptions -> WS.ConnectionOptions
 installPongHandler pong opts = opts {WS.connectionOnPong = pongHandler pong}
