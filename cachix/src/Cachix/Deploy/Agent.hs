@@ -72,7 +72,7 @@ run cachixOptions agentOpts =
 
       WebSocket.withConnection withLog websocketOptions $ \websocket ->
         WebSocket.handleJSONMessages @(WSS.Message WSS.AgentCommand) @(WSS.Message WSS.BackendCommand) withLog websocket $
-          WebSocket.receive websocket >>= \channel ->
+          WebSocket.withOpenChannel websocket $ \channel ->
             fix $ \keepReading ->
               WebSocket.read channel >>= \case
                 Just (WebSocket.DataMessage message) -> do

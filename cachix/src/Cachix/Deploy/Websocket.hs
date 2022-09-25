@@ -74,6 +74,12 @@ receive WebSocket {rx, channels} = do
     pure (channel : ch)
   pure channel
 
+withOpenChannel :: WebSocket tx rx -> (Receive rx -> IO a) -> IO a
+withOpenChannel websocket =
+  Safe.bracket
+    (receive websocket)
+    (atomically . TMChan.closeTMChan)
+
 -- | Read incoming messages on a channel opened with 'receive'.
 read :: Receive rx -> IO (Maybe (Message rx))
 read = atomically . TMChan.readTMChan
