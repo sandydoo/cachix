@@ -14,8 +14,8 @@ import qualified Cachix.Deploy.Lock as Lock
 import qualified Cachix.Deploy.Log as Log
 import qualified Cachix.Deploy.Websocket as WebSocket
 import qualified Control.Concurrent.Async as Async
-import qualified Control.Concurrent.MVar as MVar
 import qualified Control.Concurrent.STM.TMQueue as TMQueue
+import qualified Control.Concurrent.STM.TMVar as TMVar
 import qualified Control.Exception.Safe as Safe
 import qualified Data.Aeson as Aeson
 import qualified Data.Conduit.TQueue as Conduit
@@ -84,15 +84,15 @@ connectToService ::
   WebSocket.Options ->
   IO (Agent.ServiceWebSocket, Async.Async ())
 connectToService withLog websocketOptions = do
-  initialConnection <- MVar.newEmptyMVar
+  initialConnection <- TMVar.newEmptyTMVarIO
 
   thread <- Async.async $
     WebSocket.withConnection withLog websocketOptions $ \websocket -> do
-      _ <- MVar.tryPutMVar initialConnection websocket
+      _ <- atomically $ TMVar.tryPutTMVar initialConnection websocket
       WebSocket.handleJSONMessages withLog websocket (WebSocket.consumeIntoVoid websocket)
 
   -- Block until the connection has been established
-  websocket <- MVar.readMVar initialConnection
+  websocket <- atomically $ TMVar.readTMVar initialConnection
 
   return (websocket, thread)
 
