@@ -144,7 +144,7 @@ withConnection withLog Options {host, path, headers, agentIdentifier} app = do
               MVar.putMVar connection newConnection
 
               WS.withPingThread newConnection pingEvery pingHandler (app websocket)
-        `Safe.finally` dropConnection
+              `Safe.finally` dropConnection
 
 -- Handle JSON messages
 
@@ -153,6 +153,7 @@ handleJSONMessages websocket app =
   Async.withAsync (handleIncomingJSON websocket) $ \incomingThread ->
     Async.withAsync (handleOutgoingJSON websocket `finally` closeGracefully incomingThread) $ \outgoingThread -> do
       app
+      drainQueue websocket
       Async.wait outgoingThread
   where
     closeGracefully incomingThread = do
