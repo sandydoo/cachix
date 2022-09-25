@@ -89,7 +89,7 @@ connectToService withLog websocketOptions = do
   thread <- Async.async $
     WebSocket.withConnection withLog websocketOptions $ \websocket -> do
       _ <- MVar.tryPutMVar initialConnection websocket
-      WebSocket.handleJSONMessages websocket (WebSocket.consumeIntoVoid websocket)
+      WebSocket.handleJSONMessages withLog websocket (WebSocket.consumeIntoVoid websocket)
 
   -- Block until the connection has been established
   websocket <- MVar.readMVar initialConnection

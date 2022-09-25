@@ -155,8 +155,8 @@ withConnection withLog Options {host, path, headers, agentIdentifier} app = do
 
 -- Handle JSON messages
 
-handleJSONMessages :: (Aeson.ToJSON tx, Aeson.FromJSON rx) => WebSocket tx rx -> IO () -> IO ()
-handleJSONMessages websocket app =
+handleJSONMessages :: (Aeson.ToJSON tx, Aeson.FromJSON rx) => Log.WithLog -> WebSocket tx rx -> IO () -> IO ()
+handleJSONMessages withLog websocket app =
   Async.withAsync (handleIncomingJSON websocket) $ \incomingThread ->
     Async.withAsync (handleOutgoingJSON websocket `finally` closeGracefully incomingThread) $ \outgoingThread -> do
       app
@@ -164,11 +164,14 @@ handleJSONMessages websocket app =
   where
     closeGracefully incomingThread = do
       repsonseToCloseRequest <- startGracePeriod $ do
+        withLog $ K.logLocM K.DebugS $ K.ls ("Closing gracefully" :: Text)
         MVar.tryReadMVar (connection websocket) >>= \case
-          Just activeConnection ->
+          Just activeConnection -> do
+            withLog $ K.logLocM K.DebugS $ K.ls ("Sent close" :: Text)
             WS.sendClose activeConnection ("Closing." :: ByteString)
           Nothing -> pure ()
         _ <- Async.wait incomingThread
+        withLog $ K.logLocM K.DebugS $ K.ls ("Received close request. Closing channel." :: Text)
         atomically (TMChan.closeTMChan (rx websocket))
 
       when (isNothing repsonseToCloseRequest) throwNoResponseToCloseRequest
