@@ -79,7 +79,10 @@ run cachixOptions agentOpts =
                   withLog $ K.logLocM K.DebugS "Reading further"
                   handleMessage withLog agentState agentName agentToken message
                   keepReading
-                _ -> do
+                Just _ -> do
+                  withLog $ K.logLocM K.DebugS "Control message received"
+                  keepReading
+                Nothing -> do
                   withLog $ K.logLocM K.DebugS "Nothing received by agent"
                   pure ()
   where
