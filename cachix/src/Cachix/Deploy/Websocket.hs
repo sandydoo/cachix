@@ -154,12 +154,15 @@ withConnection withLog Options {host, path, headers, agentIdentifier} app = do
 -- Handle JSON messages
 
 handleJSONMessages :: (Aeson.ToJSON tx, Aeson.FromJSON rx) => WebSocket tx rx -> IO () -> IO ()
-handleJSONMessages websocket app =
+handleJSONMessages websocket app = handle mvar $
   Async.withAsync (handleIncomingJSON websocket) $ \incomingThread ->
     Async.withAsync (handleOutgoingJSON websocket `finally` closeGracefully incomingThread) $ \outgoingThread -> do
       app
       Async.wait outgoingThread
   where
+    mvar :: BlockedIndefinitelyOnMVar -> IO ()
+    mvar _ = pure ()
+
     closeGracefully incomingThread = do
       repsonseToCloseRequest <- startGracePeriod $ do
         MVar.tryReadMVar (connection websocket) >>= \case
