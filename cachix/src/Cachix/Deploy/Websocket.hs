@@ -8,9 +8,9 @@ import Cachix.Client.Version (versionNumber)
 import qualified Cachix.Deploy.Log as Log
 import qualified Cachix.Deploy.WebsocketPong as WebsocketPong
 import qualified Control.Concurrent.Async as Async
-import qualified Control.Concurrent.MVar as MVar
 import qualified Control.Concurrent.STM.TBMQueue as TBMQueue
 import qualified Control.Concurrent.STM.TMChan as TMChan
+import qualified Control.Concurrent.STM.TMVar as TMVar
 import Control.Exception.Safe (Handler (..), MonadMask, isSyncException)
 import qualified Control.Exception.Safe as Safe
 import qualified Control.Retry as Retry
@@ -40,14 +40,14 @@ import qualified Wuss
 -- Maintains the connection by periodically sending pings.
 data WebSocket tx rx = WebSocket
   { -- | The active WebSocket connection, if available
-    connection :: MVar.MVar WS.Connection,
+    connection :: TMVar.TMVar WS.Connection,
     -- | A timestamp of the last pong message received
     lastPong :: WebsocketPong.LastPongState,
     -- | See 'Transmit'
     tx :: Transmit tx,
     -- | See 'Receive'
     rx :: Receive rx,
-    channels :: MVar.MVar [Receive rx],
+    channels :: TMVar.TMVar [Receive rx],
     withLog :: Log.WithLog
   }
 
@@ -70,8 +70,9 @@ send WebSocket {tx} = atomically . TBMQueue.writeTBMQueue tx
 receive :: WebSocket tx rx -> IO (Receive rx)
 receive WebSocket {rx, channels} = do
   channel <- atomically (TMChan.dupTMChan rx)
-  MVar.modifyMVar_ channels $ \ch ->
-    pure (channel : ch)
+  atomically $ do
+    chans <- TMVar.takeTMVar channels
+    TMVar.putTMVar channels (channel : chans)
   pure channel
 
 withOpenChannel :: WebSocket tx rx -> (Receive rx -> IO a) -> IO a
@@ -87,12 +88,12 @@ read = atomically . TMChan.readTMChan
 closeOpenChannels :: WebSocket tx rx -> IO ()
 closeOpenChannels WebSocket {rx, channels} = do
   atomically (TMChan.closeTMChan rx)
-  openChannels <- MVar.tryTakeMVar channels
-  case openChannels of
-    Just chans ->
-      atomically $
+  atomically $ do
+    openChannels <- TMVar.tryTakeTMVar channels
+    case openChannels of
+      Just chans ->
         for_ chans TMChan.closeTMChan
-    Nothing -> pure ()
+      Nothing -> pure ()
 
 -- | Close the outgoing queue.
 drainQueue :: WebSocket tx rx -> IO ()
@@ -137,15 +138,15 @@ withConnection withLog Options {host, path, headers, agentIdentifier} app = do
         WebsocketPong.pingHandler lastPong mainThreadID pongTimeout
   let connectionOptions = WebsocketPong.installPongHandler lastPong WS.defaultConnectionOptions
 
-  connection <- MVar.newEmptyMVar
-  channels <- MVar.newMVar []
+  connection <- TMVar.newEmptyTMVarIO
+  channels <- TMVar.newTMVarIO []
   tx <- TBMQueue.newTBMQueueIO 100
   rx <- TMChan.newBroadcastTMChanIO
   let websocket = WebSocket {connection, tx, rx, channels, lastPong, withLog}
 
   let dropConnection = do
         withLog $ K.logLocM K.DebugS "Dropping connection"
-        void $ MVar.tryTakeMVar connection
+        void $ atomically $ TMVar.tryTakeTMVar connection
 
   let closeChannels = do
         withLog $ K.logLocM K.DebugS "Closing channels"
@@ -169,9 +170,9 @@ withConnection withLog Options {host, path, headers, agentIdentifier} app = do
               WebsocketPong.pongHandler lastPong
 
               -- Update the connection
-              isEmpty <- MVar.isEmptyMVar connection
+              isEmpty <- atomically $ TMVar.isEmptyTMVar connection
               withLog $ K.logLocM K.DebugS $ K.ls $ "Connection: " <> (show isEmpty :: Text)
-              MVar.putMVar connection newConnection
+              atomically $ TMVar.putTMVar connection newConnection
 
               WS.withPingThread newConnection pingEvery pingHandler (app websocket)
               -- Async.withAsync (sendPingEvery pingEvery websocket) $ \_ -> app websocket
@@ -189,7 +190,7 @@ handleJSONMessages withLog websocket app =
     closeGracefully incomingThread = do
       repsonseToCloseRequest <- startGracePeriod $ do
         withLog $ K.logLocM K.DebugS $ K.ls ("Closing gracefully" :: Text)
-        MVar.tryReadMVar (connection websocket) >>= \case
+        atomically (TMVar.tryReadTMVar (connection websocket)) >>= \case
           Just activeConnection -> do
             withLog $ K.logLocM K.DebugS $ K.ls ("Sent close" :: Text)
             WS.sendClose activeConnection ("Closing." :: ByteString)
@@ -202,7 +203,7 @@ handleJSONMessages withLog websocket app =
 
 handleIncomingJSON :: (Aeson.FromJSON rx) => WebSocket tx rx -> IO ()
 handleIncomingJSON websocket@WebSocket {connection, rx, withLog} = do
-  activeConnection <- MVar.readMVar connection
+  activeConnection <- atomically $ TMVar.readTMVar connection
   let broadcast = atomically . TMChan.writeTMChan rx
 
   forever $ do
@@ -225,7 +226,7 @@ handleIncomingJSON websocket@WebSocket {connection, rx, withLog} = do
 
 handleOutgoingJSON :: forall tx rx. Aeson.ToJSON tx => WebSocket tx rx -> IO ()
 handleOutgoingJSON WebSocket {connection, tx} = do
-  activeConnection <- MVar.readMVar connection
+  activeConnection <- atomically $ TMVar.readTMVar connection
   Conduit.runConduit $
     Conduit.sourceTBMQueue tx
       .| Conduit.mapM_ (sendJSONMessage activeConnection)
@@ -294,7 +295,7 @@ waitForPong seconds websocket =
 
 sendPingEvery :: Int -> WebSocket tx rx -> IO ()
 sendPingEvery seconds WebSocket {connection} = forever $ do
-  activeConnection <- MVar.readMVar connection
+  activeConnection <- atomically $ TMVar.readTMVar connection
   WS.sendPing activeConnection BS.empty
   threadDelay (seconds * 1000 * 1000)
 
