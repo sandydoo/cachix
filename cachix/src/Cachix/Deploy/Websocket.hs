@@ -150,7 +150,8 @@ withConnection withLog Options {host, path, headers, agentIdentifier} app = do
               withLog $ K.logLocM K.DebugS $ K.ls $ "Connection: " <> (show isEmpty :: Text)
               MVar.putMVar connection newConnection
 
-              WS.withPingThread newConnection pingEvery pingHandler (app websocket)
+              -- WS.withPingThread newConnection pingEvery pingHandler (app websocket)
+              Async.withAsync (sendPingEvery pingEvery websocket) $ \_ -> app websocket
               `Safe.finally` dropConnection
 
 -- Handle JSON messages
