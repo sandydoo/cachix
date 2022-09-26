@@ -245,10 +245,10 @@ reconnectWithLog withLog inner =
 
     exitOnCloseRequest _ = Handler $ \(e :: WS.ConnectionException) ->
       case e of
-        WS.CloseRequest _ _ -> do
+        WS.CloseRequest _ msg -> do
           liftIO . withLog $
             K.logLocM K.DebugS . K.ls $
-              ("Received close request from peer. Closing connection" :: Text)
+              "Received close request from peer (" <> msg <> "). Closing connection"
           return False
         _ -> return True
 
