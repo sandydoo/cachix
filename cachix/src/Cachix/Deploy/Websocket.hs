@@ -155,9 +155,6 @@ withConnection withLog Options {host, path, headers, agentIdentifier} app = do
             do
               withLog $ K.logLocM K.InfoS "Connected to Cachix Deploy service"
 
-              closed <- atomically $ TMChan.isClosedTMChan rx
-              withLog $ K.logLocM K.InfoS $ K.ls ("TMChan" <> show closed :: ByteString)
-
               -- Reset the pong state in case we're reconnecting
               WebsocketPong.pongHandler lastPong
 
