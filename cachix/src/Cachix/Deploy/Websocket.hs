@@ -70,10 +70,12 @@ receive :: WebSocket tx rx -> IO (Receive rx)
 receive WebSocket {rx} = atomically $ TMChan.dupTMChan rx
 
 withOpenChannel :: WebSocket tx rx -> (Receive rx -> IO a) -> IO a
-withOpenChannel websocket =
-  bracket
-    (receive websocket)
-    (atomically . TMChan.closeTMChan)
+withOpenChannel websocket action =
+  receive websocket >>= action
+
+-- channel
+--   (receive websocket)
+--   (atomically . TMChan.closeTMChan)
 
 -- | Read incoming messages on a channel opened with 'receive'.
 read :: Receive rx -> IO (Maybe (Message rx))
