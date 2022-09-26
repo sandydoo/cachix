@@ -153,6 +153,9 @@ withConnection withLog Options {host, path, headers, agentIdentifier} app = do
             do
               withLog $ K.logLocM K.InfoS "Connected to Cachix Deploy service"
 
+              closed <- atomically $ TMChan.isClosedTMChan rx
+              withLog $ K.logLocM K.InfoS $ K.ls ("TMChan" <> show closed :: ByteString)
+
               -- Reset the pong state in case we're reconnecting
               WebsocketPong.pongHandler lastPong
 
@@ -189,7 +192,7 @@ handleJSONMessages websocket app =
       repsonseToCloseRequest <- startGracePeriod $ do
         MVar.tryReadMVar (connection websocket) >>= \case
           Just activeConnection -> do
-            WS.sendClose activeConnection ("Peer initiated close" :: ByteString)
+            WS.sendClose activeConnection ("Peer initiated close request" :: ByteString)
             Async.wait incomingThread
           Nothing -> pure ()
 
