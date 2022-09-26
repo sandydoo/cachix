@@ -79,6 +79,16 @@ withOpenChannel websocket =
 read :: Receive rx -> IO (Maybe (Message rx))
 read = atomically . TMChan.readTMChan
 
+readDataMessages :: Receive rx -> (rx -> IO ()) -> IO ()
+readDataMessages channel action = loop
+  where
+    loop =
+      read channel >>= \case
+        Just (DataMessage message) -> action message *> loop
+        Just (ControlMessage (WS.Close _ _)) -> pure ()
+        Just _ -> loop
+        Nothing -> pure ()
+
 -- | Close the outgoing queue.
 drainQueue :: WebSocket tx rx -> IO ()
 drainQueue WebSocket {tx} = atomically $ TBMQueue.closeTBMQueue tx
@@ -150,14 +160,17 @@ withConnection withLog Options {host, path, headers, agentIdentifier} app = do
               MVar.putMVar connection newConnection
 
               -- WS.withPingThread newConnection pingEvery pingHandler (app websocket)
-              Async.withAsync (sendPingEvery2 pingEvery pingHandler websocket) $ \_ -> app websocket
+              Async.withAsync (sendPingEvery2 withLog pingEvery pingHandler websocket) $ \_ -> app websocket
               `Safe.finally` dropConnection
 
-sendPingEvery2 :: Int -> IO () -> WebSocket tx rx -> IO ()
-sendPingEvery2 seconds handlePing WebSocket {connection} = forever $ do
+sendPingEvery2 :: Log.WithLog -> Int -> IO () -> WebSocket tx rx -> IO ()
+sendPingEvery2 withLog seconds handlePing WebSocket {connection} = forever $ do
+  withLog $ K.logLocM K.DebugS "Checking last ping"
   handlePing
   activeConnection <- MVar.readMVar connection
+  withLog $ K.logLocM K.DebugS "Got connection for ping"
   WS.sendPing activeConnection BS.empty
+  withLog $ K.logLocM K.DebugS "Sent ping!"
   threadDelay (seconds * 1000 * 1000)
 
 -- Handle JSON messages
