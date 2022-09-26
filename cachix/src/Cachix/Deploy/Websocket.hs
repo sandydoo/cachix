@@ -69,7 +69,7 @@ send WebSocket {tx} = atomically . TBMQueue.writeTBMQueue tx
 receive :: WebSocket tx rx -> IO (Receive rx)
 receive WebSocket {rx} = atomically $ TMChan.dupTMChan rx
 
-withOpenChannel :: WebSocket tx rx -> (Receive rx -> IO ()) -> IO ()
+withOpenChannel :: WebSocket tx rx -> (Receive rx -> IO a) -> IO a
 withOpenChannel websocket =
   bracket
     (receive websocket)
@@ -178,19 +178,20 @@ sendPingEvery2 withLog seconds handlePing WebSocket {connection} = forever $ do
 handleJSONMessages :: (Aeson.ToJSON tx, Aeson.FromJSON rx) => WebSocket tx rx -> IO () -> IO ()
 handleJSONMessages websocket app =
   Async.withAsync (handleIncomingJSON websocket) $ \incomingThread ->
-    Async.withAsync (handleOutgoingJSON websocket `finally` closeGracefully incomingThread) $ \outgoingThread -> do
+    Async.withAsync (handleOutgoingJSON websocket) $ \outgoingThread -> do
       app
       drainQueue websocket
+      Async.wait outgoingThread
+      closeGracefully incomingThread
       Async.wait outgoingThread
   where
     closeGracefully incomingThread = do
       repsonseToCloseRequest <- startGracePeriod $ do
         MVar.tryReadMVar (connection websocket) >>= \case
-          Just activeConnection ->
+          Just activeConnection -> do
             WS.sendClose activeConnection ("Closing." :: ByteString)
+            Async.wait incomingThread
           Nothing -> pure ()
-        _ <- Async.wait incomingThread
-        atomically (TMChan.closeTMChan (rx websocket))
 
       when (isNothing repsonseToCloseRequest) throwNoResponseToCloseRequest
 
@@ -280,11 +281,11 @@ waitForPong :: Int -> WebSocket tx rx -> IO (Maybe Time.UTCTime)
 waitForPong seconds websocket =
   Async.withAsync (sendPingEvery 1 websocket) $ \_ ->
     Timeout.timeout (seconds * 1000 * 1000) $ do
-      channel <- receive websocket
-      fix $ \waitForNextMsg -> do
-        read channel >>= \case
-          Just (ControlMessage (WS.Pong _)) -> Time.getCurrentTime
-          _ -> waitForNextMsg
+      withOpenChannel websocket $ \channel ->
+        fix $ \waitForNextMsg -> do
+          read channel >>= \case
+            Just (ControlMessage (WS.Pong _)) -> Time.getCurrentTime
+            _ -> waitForNextMsg
 
 sendPingEvery :: Int -> WebSocket tx rx -> IO ()
 sendPingEvery seconds WebSocket {connection} = forever $ do
