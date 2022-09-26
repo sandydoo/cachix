@@ -69,6 +69,12 @@ send WebSocket {tx} = atomically . TBMQueue.writeTBMQueue tx
 receive :: WebSocket tx rx -> IO (Receive rx)
 receive WebSocket {rx} = atomically $ TMChan.dupTMChan rx
 
+withOpenChannel :: WebSocket tx rx -> (Receive rx -> IO ()) -> IO ()
+withOpenChannel websocket =
+  bracket
+    (receive websocket)
+    (atomically . TMChan.closeTMChan)
+
 -- | Read incoming messages on a channel opened with 'receive'.
 read :: Receive rx -> IO (Maybe (Message rx))
 read = atomically . TMChan.readTMChan
@@ -143,8 +149,16 @@ withConnection withLog Options {host, path, headers, agentIdentifier} app = do
               -- Update the connection
               MVar.putMVar connection newConnection
 
-              WS.withPingThread newConnection pingEvery pingHandler (app websocket)
+              -- WS.withPingThread newConnection pingEvery pingHandler (app websocket)
+              Async.withAsync (sendPingEvery2 pingEvery pingHandler websocket) $ \_ -> app websocket
               `Safe.finally` dropConnection
+
+sendPingEvery2 :: Int -> IO () -> WebSocket tx rx -> IO ()
+sendPingEvery2 seconds handlePing WebSocket {connection} = forever $ do
+  handlePing
+  activeConnection <- MVar.readMVar connection
+  WS.sendPing activeConnection BS.empty
+  threadDelay (seconds * 1000 * 1000)
 
 -- Handle JSON messages
 
