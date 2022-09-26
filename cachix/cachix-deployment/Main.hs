@@ -74,7 +74,7 @@ main = do
         `finally` do
           withLog $ K.logLocM K.DebugS $ K.ls ("Cleaning up websocket connections" :: Text)
           atomically $ TMQueue.closeTMQueue logQueue
-          WebSocket.drainQueue service
+          serviceThread <- shutdownService
           Async.waitBoth serviceThread loggingThread
 
 -- | Open and maintain a websocket connection to the backend for sending deployment
@@ -82,28 +82,22 @@ main = do
 connectToService ::
   Log.WithLog ->
   WebSocket.Options ->
-  IO (Agent.ServiceWebSocket, IO ())
-connectToService withLog websocketOptions =
-  do
-    initialConnection <- MVar.newEmptyMVar
-    close <- MVar.newEmptyMVar
+  IO (Agent.ServiceWebSocket, IO (Async ()))
+connectToService withLog websocketOptions = do
+  initialConnection <- MVar.newEmptyMVar
+  close <- MVar.newEmptyMVar
 
-    thread <- Async.async $
-      WebSocket.withConnection withLog websocketOptions $ \websocket -> do
-        MVar.putMVar initialConnection websocket
-        WebSocket.handleJSONMessages websocket (MVar.readMVar close)
+  thread <- Async.async $
+    WebSocket.withConnection withLog websocketOptions $ \websocket -> do
+      MVar.putMVar initialConnection websocket
+      WebSocket.handleJSONMessages websocket (MVar.readMVar close)
 
-    -- Block until the connection has been established
-    websocket <- MVar.takeMVar initialConnection
+  -- Block until the connection has been established
+  websocket <- MVar.takeMVar initialConnection
 
-    let shutdownService = do
-   MVar.putMVar
-   close
-   ()
-   Async.wait
-   thread
-   return
-   (websocket, shutdownService)
+  let shutdownService = MVar.putMVar close () $> thread
+
+  return (websocket, shutdownService)
 
 -- | Run the deployment commands
 deploy ::
