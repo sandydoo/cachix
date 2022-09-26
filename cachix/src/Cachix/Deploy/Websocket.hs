@@ -125,7 +125,7 @@ withConnection withLog Options {host, path, headers, agentIdentifier} app = do
   mainThreadID <- myThreadId
   lastPong <- WebsocketPong.newState
 
-  let pingEvery = 5
+  let pingEvery = 30
   let pongTimeout = pingEvery * 2
   let pingHandler = do
         last <- WebsocketPong.secondsSinceLastPong lastPong
