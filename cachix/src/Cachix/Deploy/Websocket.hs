@@ -274,14 +274,6 @@ reconnectWithLog withLog inner =
     toSeconds t =
       floor $ (fromIntegral t :: Double) / 1000 / 1000
 
--- | Open a receiving channel and discard all incoming messages.
-consumeIntoVoid :: WebSocket tx rx -> IO ()
-consumeIntoVoid websocket = do
-  rx <- receive websocket
-  fix $ \keepReading -> do
-    msg <- read rx
-    when (isJust msg) keepReading
-
 waitForPong :: Int -> WebSocket tx rx -> IO (Maybe Time.UTCTime)
 waitForPong seconds websocket =
   Async.withAsync (sendPingEvery 1 websocket) $ \_ ->

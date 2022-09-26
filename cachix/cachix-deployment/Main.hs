@@ -68,7 +68,7 @@ main = do
       (logQueue, loggingThread) <- runLogStream withLog host logPath (WebSocket.headers websocketOptions)
 
       -- Open a connection to Cachix and block until it's ready.
-      (service, serviceThread) <- connectToService withLog websocketOptions
+      (service, shutdownService) <- connectToService withLog websocketOptions
 
       deploy withLog deployment service (Conduit.sinkTMQueue logQueue)
         `finally` do
@@ -82,19 +82,28 @@ main = do
 connectToService ::
   Log.WithLog ->
   WebSocket.Options ->
-  IO (Agent.ServiceWebSocket, Async.Async ())
-connectToService withLog websocketOptions = do
-  initialConnection <- MVar.newEmptyMVar
+  IO (Agent.ServiceWebSocket, IO ())
+connectToService withLog websocketOptions =
+  do
+    initialConnection <- MVar.newEmptyMVar
+    close <- MVar.newEmptyMVar
 
-  thread <- Async.async $
-    WebSocket.withConnection withLog websocketOptions $ \websocket -> do
-      MVar.putMVar initialConnection websocket
-      WebSocket.handleJSONMessages websocket (WebSocket.consumeIntoVoid websocket)
+    thread <- Async.async $
+      WebSocket.withConnection withLog websocketOptions $ \websocket -> do
+        MVar.putMVar initialConnection websocket
+        WebSocket.handleJSONMessages websocket (MVar.readMVar close)
 
-  -- Block until the connection has been established
-  websocket <- MVar.takeMVar initialConnection
+    -- Block until the connection has been established
+    websocket <- MVar.takeMVar initialConnection
 
-  return (websocket, thread)
+    let shutdownService = do
+   MVar.putMVar
+   close
+   ()
+   Async.wait
+   thread
+   return
+   (websocket, shutdownService)
 
 -- | Run the deployment commands
 deploy ::
