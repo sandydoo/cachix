@@ -201,9 +201,11 @@ handleJSONMessages websocket app =
       when (isNothing repsonseToCloseRequest) throwNoResponseToCloseRequest
 
 handleIncomingJSON :: (Aeson.FromJSON rx) => WebSocket tx rx -> IO ()
-handleIncomingJSON websocket@WebSocket {connection, rx, withLog} = do
+handleIncomingJSON websocket@WebSocket {connection, rx, withLog} = Safe.handleAny logException $ do
   activeConnection <- MVar.readMVar connection
-  let broadcast = atomically . TMChan.writeTMChan rx
+  let broadcast msg = do
+        withLog $ K.logLocM K.DebugS "Broadcast"
+        atomically (TMChan.writeTMChan rx msg)
 
   forever $ do
     msg <- WS.receive activeConnection
@@ -222,14 +224,17 @@ handleIncomingJSON websocket@WebSocket {connection, rx, withLog} = do
             shutdownNow websocket code closeMsg
 
         broadcast (ControlMessage controlMsg)
+  where
+    logException e = withLog $ K.logLocM K.ErrorS $ K.ls ("Caught in incoming: " <> toS (displayException e) :: ByteString)
 
 handleOutgoingJSON :: forall tx rx. Aeson.ToJSON tx => WebSocket tx rx -> IO ()
-handleOutgoingJSON WebSocket {connection, tx} = do
+handleOutgoingJSON WebSocket {connection, tx, withLog} = Safe.handleAny logException $ do
   activeConnection <- MVar.readMVar connection
   Conduit.runConduit $
     Conduit.sourceTBMQueue tx
       .| Conduit.mapM_ (sendJSONMessage activeConnection)
   where
+    logException e = withLog $ K.logLocM K.ErrorS $ K.ls ("Caught in outgoing: " <> toS (displayException e) :: ByteString)
     sendJSONMessage :: WS.Connection -> Message tx -> IO ()
     sendJSONMessage conn (ControlMessage msg) = WS.send conn (WS.ControlMessage msg)
     sendJSONMessage conn (DataMessage msg) = WS.sendTextData conn (Aeson.encode msg)
