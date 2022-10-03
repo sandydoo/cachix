@@ -184,11 +184,11 @@ handleJSONMessages :: (Aeson.ToJSON tx, Aeson.FromJSON rx) => WebSocket tx rx ->
 handleJSONMessages websocket app =
   Async.withAsync (handleIncomingJSON websocket) $ \incomingThread ->
     Async.withAsync (handleOutgoingJSON websocket) $ \outgoingThread -> do
+      Async.link2 incomingThread outgoingThread
       app
       drainQueue websocket
       Async.wait outgoingThread
       closeGracefully incomingThread
-      Async.wait outgoingThread
   where
     closeGracefully incomingThread = do
       repsonseToCloseRequest <- startGracePeriod $ do
