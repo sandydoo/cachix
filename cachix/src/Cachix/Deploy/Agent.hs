@@ -14,9 +14,11 @@ import qualified Cachix.Deploy.OptionsParser as AgentOptions
 import qualified Cachix.Deploy.StdinProcess as StdinProcess
 import qualified Cachix.Deploy.Websocket as WebSocket
 import Control.Exception.Safe (handleAny, onException)
+import qualified Control.Exception.Safe as Safe
 import qualified Data.Aeson as Aeson
 import Data.IORef
 import Data.String (String)
+import Dhall.Parser.Token (_with)
 import qualified Katip as K
 import Paths_cachix (getBinDir)
 import Protolude hiding (onException, toS)
@@ -52,7 +54,7 @@ registerAgent agentState agentInformation = do
   liftIO $ atomicWriteIORef agentState (Just agentInformation)
 
 run :: Config.CachixOptions -> AgentOptions.AgentOptions -> IO ()
-run cachixOptions agentOpts =
+run cachixOptions agentOptions =
   Log.withLog logOptions $ \withLog ->
     handleAny (logAndExit withLog) $ do
       checkUserOwnsHome
@@ -61,7 +63,7 @@ run cachixOptions agentOpts =
       agentToken <- toS <$> getEnv "CACHIX_AGENT_TOKEN"
       agentState <- newIORef Nothing
 
-      let agentName = AgentOptions.name agentOpts
+      let agentName = AgentOptions.name agentOptions
       let port = fromMaybe (URI.Port 80) $ (URI.getPortFor . URI.getScheme) host
       let websocketOptions =
             WebSocket.Options
@@ -75,14 +77,25 @@ run cachixOptions agentOpts =
 
       WebSocket.withConnection withLog websocketOptions $ \websocket ->
         WebSocket.handleJSONMessages @(WSS.Message WSS.AgentCommand) @(WSS.Message WSS.BackendCommand) websocket $
-          WebSocket.receive websocket >>= \channel ->
-            WebSocket.readDataMessages channel $ \message ->
-              handleMessage withLog agentState agentName agentToken message
+          Safe.handle handleExit $
+            WebSocket.receive websocket >>= \channel ->
+              WebSocket.readDataMessages channel $ \message -> do
+                withLog $ K.logLocM K.DebugS $ K.ls (show message :: Text)
+                handleCommand withLog agentState agentName agentToken (WSS.command message)
+
+                case WSS.command message of
+                  WSS.Deployment _ -> do
+                    withLog $ K.logLocM K.DebugS $ K.ls ("Should I exit: " <> show (AgentOptions.singleRun agentOptions) :: Text)
+                    when (AgentOptions.singleRun agentOptions) exitSuccess
+                  _ -> pure ()
   where
+    handleExit :: ExitCode -> IO ()
+    handleExit _ = pure ()
+
     host = Config.host cachixOptions
     basename = URI.getHostname host
 
-    profileName = fromMaybe "system" (AgentOptions.profile agentOpts)
+    profileName = fromMaybe "system" (AgentOptions.profile agentOptions)
 
     logAndExit withLog e = do
       void $ withLog $ K.logLocM K.ErrorS $ K.ls (displayException e)
@@ -100,14 +113,12 @@ run cachixOptions agentOpts =
           environment = "production"
         }
 
-    handleMessage :: Log.WithLog -> AgentState -> Text -> Text -> WSS.Message WSS.BackendCommand -> IO ()
-    handleMessage withLog agentState agentName agentToken payload =
-      handleCommand (WSS.command payload)
-      where
-        handleCommand :: WSS.BackendCommand -> IO ()
-        handleCommand (WSS.AgentRegistered agentInformation) =
+    handleCommand :: Log.WithLog -> AgentState -> Text -> Text -> WSS.BackendCommand -> IO ()
+    handleCommand withLog agentState agentName agentToken payload =
+      case payload of
+        WSS.AgentRegistered agentInformation ->
           withLog $ registerAgent agentState agentInformation
-        handleCommand (WSS.Deployment deploymentDetails) = do
+        WSS.Deployment deploymentDetails -> do
           agentRegistered <- readIORef agentState
 
           case agentRegistered of

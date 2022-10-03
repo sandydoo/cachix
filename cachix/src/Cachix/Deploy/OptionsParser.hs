@@ -27,7 +27,8 @@ parser =
 
 data AgentOptions = AgentOptions
   { name :: Text,
-    profile :: Maybe Text
+    profile :: Maybe Text,
+    singleRun :: Bool
   }
   deriving (Show)
 
@@ -49,6 +50,7 @@ parserAgentOptions =
               <> help "Nix profile to manage. Defaults to 'system' on NixOS and 'system-profiles/system' on nix-darwin."
           )
       )
+    <*> switch (long "single-run" <> help "Exit after the first deployment")
 
 parserActivateOptions :: Parser ActivateOptions
 parserActivateOptions =

@@ -3,12 +3,12 @@ module Cachix.Deploy.StdinProcess where
 import Protolude hiding (stdin)
 import System.IO (hClose)
 import System.Process
-import Prelude (String)
+import Prelude (String, userError)
 
 -- | Spawn a process with only stdin as an input
 spawnProcess :: FilePath -> [String] -> String -> IO ()
 spawnProcess cmd args input = do
-  (Just stdin, _, _, _) <-
+  (Just stdin, _, _, handle) <-
     createProcess
       (proc cmd args)
         { std_in = CreatePipe,
@@ -19,3 +19,7 @@ spawnProcess cmd args input = do
         }
   hPutStr stdin input
   hClose stdin
+  exitcode <- waitForProcess handle
+  case exitcode of
+    ExitSuccess -> return ()
+    ExitFailure code -> ioError $ userError $ "Process " <> show cmd <> " failed with exit code " <> show code
