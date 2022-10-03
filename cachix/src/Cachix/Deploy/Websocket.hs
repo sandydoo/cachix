@@ -154,17 +154,21 @@ withConnection withLog options app = do
         -- TODO: https://github.com/jaspervdj/websockets/issues/229
         runClientWith options connectionOptions $
           \newConnection ->
-            do
-              withLog $ K.logLocM K.InfoS "Connected to Cachix Deploy service"
+            Safe.finally
+              ( do
+                  withLog $ K.logLocM K.InfoS "Connected to Cachix Deploy service"
 
-              -- Reset the pong state in case we're reconnecting
-              WebsocketPong.pongHandler lastPong
+                  -- Reset the pong state in case we're reconnecting
+                  WebsocketPong.pongHandler lastPong
 
-              -- Update the connection
-              MVar.putMVar connection newConnection
+                  -- Update the connection
+                  MVar.putMVar connection newConnection
 
-              Async.withAsync (sendPingEvery pingEvery onPing websocket) $ \_ -> app websocket
-              `Safe.finally` dropConnection
+                  Async.withAsync (sendPingEvery pingEvery onPing websocket) $ \_ -> do
+                    threadDelay (90 * 1000 * 1000)
+                    throwIO WebsocketPong.WebsocketPongTimeout
+              )
+              dropConnection
 
 runClientWith :: Options -> WS.Connection.ConnectionOptions -> WS.ClientApp a -> IO a
 runClientWith Options {host, port, path, headers, useSSL} connectionOptions app =
