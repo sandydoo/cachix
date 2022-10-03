@@ -225,7 +225,9 @@ handleIncomingJSON websocket@WebSocket {connection, rx, withLog} = Safe.handleAn
 
         broadcast (ControlMessage controlMsg)
   where
-    logException e = withLog $ K.logLocM K.ErrorS $ K.ls ("Caught in incoming: " <> toS (displayException e) :: ByteString)
+    logException e = do
+      withLog $ K.logLocM K.ErrorS $ K.ls ("Caught in incoming: " <> toS (displayException e) :: ByteString)
+      throwIO e
 
 handleOutgoingJSON :: forall tx rx. Aeson.ToJSON tx => WebSocket tx rx -> IO ()
 handleOutgoingJSON WebSocket {connection, tx, withLog} = Safe.handleAny logException $ do
@@ -234,7 +236,10 @@ handleOutgoingJSON WebSocket {connection, tx, withLog} = Safe.handleAny logExcep
     Conduit.sourceTBMQueue tx
       .| Conduit.mapM_ (sendJSONMessage activeConnection)
   where
-    logException e = withLog $ K.logLocM K.ErrorS $ K.ls ("Caught in outgoing: " <> toS (displayException e) :: ByteString)
+    logException e = do
+      withLog $ K.logLocM K.ErrorS $ K.ls ("Caught in outgoing: " <> toS (displayException e) :: ByteString)
+      throwIO e
+
     sendJSONMessage :: WS.Connection -> Message tx -> IO ()
     sendJSONMessage conn (ControlMessage msg) = WS.send conn (WS.ControlMessage msg)
     sendJSONMessage conn (DataMessage msg) = WS.sendTextData conn (Aeson.encode msg)
