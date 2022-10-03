@@ -164,9 +164,9 @@ withConnection withLog options app = do
                   -- Update the connection
                   MVar.putMVar connection newConnection
 
-                  Async.withAsync (sendPingEvery pingEvery onPing websocket) $ \_ -> do
-                    threadDelay (90 * 1000 * 1000)
-                    throwIO WebsocketPong.WebsocketPongTimeout
+                  Async.concurrently_
+                    (sendPingEvery pingEvery onPing websocket)
+                    (app websocket)
               )
               dropConnection
 
@@ -191,7 +191,9 @@ handleJSONMessages websocket app =
             Async.wait outgoingThread
             closeGracefully incomingThread
         )
-        $ \appThread -> void $ waitAny [incomingThread, outgoingThread, appThread]
+        ( \appThread ->
+            void $ waitAny [incomingThread, outgoingThread, appThread]
+        )
   where
     closeGracefully incomingThread = do
       repsonseToCloseRequest <- startGracePeriod $ do
@@ -204,11 +206,9 @@ handleJSONMessages websocket app =
       when (isNothing repsonseToCloseRequest) throwNoResponseToCloseRequest
 
 handleIncomingJSON :: (Aeson.FromJSON rx) => WebSocket tx rx -> IO ()
-handleIncomingJSON websocket@WebSocket {connection, rx, withLog} = Safe.handleAny logException $ do
+handleIncomingJSON websocket@WebSocket {connection, rx, withLog} = do
   activeConnection <- MVar.readMVar connection
-  let broadcast msg = do
-        withLog $ K.logLocM K.DebugS "Broadcast"
-        atomically (TMChan.writeTMChan rx msg)
+  let broadcast = atomically . TMChan.writeTMChan rx
 
   forever $ do
     msg <- WS.receive activeConnection
@@ -227,22 +227,14 @@ handleIncomingJSON websocket@WebSocket {connection, rx, withLog} = Safe.handleAn
             shutdownNow websocket code closeMsg
 
         broadcast (ControlMessage controlMsg)
-  where
-    logException e = do
-      withLog $ K.logLocM K.ErrorS $ K.ls ("Caught in incoming: " <> toS (displayException e) :: ByteString)
-      throwIO e
 
 handleOutgoingJSON :: forall tx rx. Aeson.ToJSON tx => WebSocket tx rx -> IO ()
-handleOutgoingJSON WebSocket {connection, tx, withLog} = Safe.handleAny logException $ do
+handleOutgoingJSON WebSocket {connection, tx} = do
   activeConnection <- MVar.readMVar connection
   Conduit.runConduit $
     Conduit.sourceTBMQueue tx
       .| Conduit.mapM_ (sendJSONMessage activeConnection)
   where
-    logException e = do
-      withLog $ K.logLocM K.ErrorS $ K.ls ("Caught in outgoing: " <> toS (displayException e) :: ByteString)
-      throwIO e
-
     sendJSONMessage :: WS.Connection -> Message tx -> IO ()
     sendJSONMessage conn (ControlMessage msg) = WS.send conn (WS.ControlMessage msg)
     sendJSONMessage conn (DataMessage msg) = WS.sendTextData conn (Aeson.encode msg)
