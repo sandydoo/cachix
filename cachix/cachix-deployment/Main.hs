@@ -29,6 +29,7 @@ import qualified Network.WebSockets as WS
 import Protolude hiding (toS)
 import Protolude.Conv
 import System.IO (BufferMode (..), hSetBuffering)
+import System.IO.Error
 
 -- | Activate the new deployment.
 --
@@ -127,6 +128,7 @@ deploy withLog deployment service logStream = do
       startDeployment Nothing
 
       Activate.downloadStorePaths logStream deploymentDetails cacheArgs
+      throwIO (mkIOError resourceVanishedErrorType "boop" Nothing Nothing)
 
       -- Read the closure size and report
       --
