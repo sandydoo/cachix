@@ -183,12 +183,15 @@ runClientWith Options {host, port, path, headers, useSSL} connectionOptions app 
 handleJSONMessages :: (Aeson.ToJSON tx, Aeson.FromJSON rx) => WebSocket tx rx -> IO () -> IO ()
 handleJSONMessages websocket app =
   Async.withAsync (handleIncomingJSON websocket) $ \incomingThread ->
-    Async.withAsync (handleOutgoingJSON websocket) $ \outgoingThread -> do
-      Async.link2 incomingThread outgoingThread
-      app
-      drainQueue websocket
-      Async.wait outgoingThread
-      closeGracefully incomingThread
+    Async.withAsync (handleOutgoingJSON websocket) $ \outgoingThread ->
+      Async.withAsync
+        ( do
+            app
+            drainQueue websocket
+            Async.wait outgoingThread
+            closeGracefully incomingThread
+        )
+        $ \appThread -> void $ waitAny [incomingThread, outgoingThread, appThread]
   where
     closeGracefully incomingThread = do
       repsonseToCloseRequest <- startGracePeriod $ do
