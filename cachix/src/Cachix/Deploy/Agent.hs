@@ -18,8 +18,8 @@ import qualified Control.Exception.Safe as Safe
 import qualified Data.Aeson as Aeson
 import Data.IORef
 import Data.String (String)
-import Dhall.Parser.Token (_with)
 import qualified Katip as K
+import qualified Network.WebSockets as WS
 import Paths_cachix (getBinDir)
 import Protolude hiding (onException, toS)
 import Protolude.Conv
@@ -77,17 +77,17 @@ run cachixOptions agentOptions =
 
       WebSocket.withConnection withLog websocketOptions $ \websocket ->
         WebSocket.handleJSONMessages @(WSS.Message WSS.AgentCommand) @(WSS.Message WSS.BackendCommand) websocket $
-          Safe.handle handleExit $
-            WebSocket.receive websocket >>= \channel ->
-              WebSocket.readDataMessages channel $ \message -> do
-                withLog $ K.logLocM K.DebugS $ K.ls (show message :: Text)
-                handleCommand withLog agentState agentName agentToken (WSS.command message)
+          WebSocket.receive websocket >>= \channel ->
+            fix $ \keepReading ->
+              WebSocket.read channel >>= \case
+                Just (WebSocket.DataMessage message) -> do
+                  handleCommand withLog agentState agentName agentToken (WSS.command message)
 
-                case WSS.command message of
-                  WSS.Deployment _ -> do
-                    withLog $ K.logLocM K.DebugS $ K.ls ("Should I exit: " <> show (AgentOptions.singleRun agentOptions) :: Text)
-                    when (AgentOptions.singleRun agentOptions) exitSuccess
-                  _ -> pure ()
+                  case WSS.command message of
+                    WSS.Deployment _ | AgentOptions.singleRun agentOptions -> pure ()
+                    _ -> keepReading
+                Just _ -> keepReading
+                Nothing -> pure ()
   where
     handleExit :: ExitCode -> IO ()
     handleExit _ = pure ()
