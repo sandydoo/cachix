@@ -174,7 +174,7 @@ runClientWith Options {host, port, path, headers, useSSL} connectionOptions app 
 
 -- Handle JSON messages
 
-handleJSONMessages :: (Aeson.ToJSON tx, Aeson.FromJSON rx) => WebSocket tx rx -> IO () -> IO ()
+handleJSONMessages :: (Aeson.ToJSON tx, Aeson.FromJSON rx, Show rx) => WebSocket tx rx -> IO () -> IO ()
 handleJSONMessages websocket app =
   Async.withAsync (handleIncomingJSON websocket) $ \incomingThread ->
     Async.withAsync (handleOutgoingJSON websocket) $ \outgoingThread ->
@@ -197,7 +197,7 @@ handleJSONMessages websocket app =
 
       when (isNothing repsonseToCloseRequest) throwNoResponseToCloseRequest
 
-handleIncomingJSON :: (Aeson.FromJSON rx) => WebSocket tx rx -> IO ()
+handleIncomingJSON :: (Show rx, Aeson.FromJSON rx) => WebSocket tx rx -> IO ()
 handleIncomingJSON websocket@WebSocket {connection, rx, withLog} = do
   activeConnection <- MVar.readMVar connection
   let broadcast = atomically . TMChan.writeTMChan rx
@@ -208,7 +208,9 @@ handleIncomingJSON websocket@WebSocket {connection, rx, withLog} = do
       WS.DataMessage _ _ _ am ->
         case Aeson.eitherDecodeStrict' (WS.fromDataMessage am :: ByteString) of
           Left e -> withLog $ K.logLocM K.DebugS . K.ls $ "Cannot parse websocket payload: " <> e
-          Right pMsg -> broadcast (DataMessage pMsg)
+          Right pMsg -> do
+            withLog $ K.logLocM K.DebugS $ K.ls (show pMsg :: Text)
+            broadcast (DataMessage pMsg)
       WS.ControlMessage controlMsg -> do
         case controlMsg of
           WS.Ping pl -> send websocket (ControlMessage (WS.Pong pl))
