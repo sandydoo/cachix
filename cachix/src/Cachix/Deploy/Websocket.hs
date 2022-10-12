@@ -137,7 +137,7 @@ withConnection withLog options app = do
 
   connection <- MVar.newEmptyMVar
   tx <- TBMQueue.newTBMQueueIO 100
-  rx <- TMChan.newBroadcastTMChanIO
+  rx <- TMChan.newTMChanIO
   let websocket = WebSocket {connection, tx, rx, lastPong, withLog}
 
   let dropConnection = void $ MVar.tryTakeMVar connection
@@ -201,7 +201,6 @@ handleIncomingJSON :: (Show rx, Aeson.FromJSON rx) => WebSocket tx rx -> IO ()
 handleIncomingJSON websocket@WebSocket {connection, rx, withLog} = do
   activeConnection <- MVar.readMVar connection
   let broadcast = atomically . TMChan.writeTMChan rx
-  threadDelay (2 * 1000 * 1000)
 
   forever $ do
     msg <- WS.receive activeConnection
@@ -273,6 +272,14 @@ reconnectWithLog withLog inner =
     toSeconds :: Int -> Int
     toSeconds t =
       floor $ (fromIntegral t :: Double) / 1000 / 1000
+
+-- | Open a receiving channel and discard incoming messages.
+discardIncoming :: WebSocket tx rx -> IO ()
+discardIncoming websocket = do
+  rx <- receive websocket
+  fix $ \keepReading -> do
+    msg <- read rx
+    when (isJust msg) keepReading
 
 waitForPong :: Int -> WebSocket tx rx -> IO (Maybe Time.UTCTime)
 waitForPong seconds websocket =
