@@ -137,7 +137,7 @@ withConnection withLog options app = do
 
   connection <- MVar.newEmptyMVar
   tx <- TBMQueue.newTBMQueueIO 100
-  rx <- TMChan.newTMChanIO
+  rx <- TMChan.newBroadcastTMChanIO
   let websocket = WebSocket {connection, tx, rx, lastPong, withLog}
 
   let dropConnection = void $ MVar.tryTakeMVar connection
@@ -274,6 +274,7 @@ reconnectWithLog withLog inner =
       floor $ (fromIntegral t :: Double) / 1000 / 1000
 
 -- | Open a receiving channel and discard incoming messages.
+-- Use this to
 discardIncoming :: WebSocket tx rx -> IO ()
 discardIncoming websocket = do
   rx <- receive websocket
