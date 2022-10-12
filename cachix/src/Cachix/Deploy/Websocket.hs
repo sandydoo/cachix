@@ -201,6 +201,7 @@ handleIncomingJSON :: (Show rx, Aeson.FromJSON rx) => WebSocket tx rx -> IO ()
 handleIncomingJSON websocket@WebSocket {connection, rx, withLog} = do
   activeConnection <- MVar.readMVar connection
   let broadcast = atomically . TMChan.writeTMChan rx
+  threadDelay (2 * 1000 * 1000)
 
   forever $ do
     msg <- WS.receive activeConnection
