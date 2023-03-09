@@ -114,7 +114,9 @@ exitOnceQueueIsEmpty stopProducerCallback pushWorker queryWorker queryWorkerStat
 
     -- Skip uploading the remaining paths when run in an interruptible mask to avoid hanging on IO.
     getMaskingState >>= \case
-      MaskedUninterruptible -> stopWorkers
+      MaskedUninterruptible -> do
+        print "Just stopping"
+        stopWorkers
       _ -> do
         void Systemd.notifyStopping
         stopProducerCallback
@@ -124,6 +126,7 @@ exitOnceQueueIsEmpty stopProducerCallback pushWorker queryWorker queryWorkerStat
     -- avoid seeing the generic interrupt message.
     -- Nix only uses it to cancel file transfers, which we don't use.
     stopWorkers = do
+      print "oppa"
       cancelWith queryWorker StopWorker
       cancelWith pushWorker StopWorker
 

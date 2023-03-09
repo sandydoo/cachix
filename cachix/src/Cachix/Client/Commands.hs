@@ -206,20 +206,26 @@ watchExec env pushOpts name cmd args = withPushParams env pushOpts name $ \pushP
     -- Throw any errors encountered by the workers
     Async.link watchThread
 
+    -- Stop watching the store and wait for all paths to be pushed
+    let shutdownWorkers = do
+          Signals.raiseSignal Signals.sigINT
+          Async.wait watchThread
+
     exitCode <-
       bracketOnError
         (getProcessHandle <$> System.Process.createProcess process)
         ( \processHandle -> do
+            putLText "OnError"
             -- Terminate the process
             uninterruptibleMask_ (System.Process.terminateProcess processHandle)
             -- Wait for the process to clean up and exit
             _ <- System.Process.waitForProcess processHandle
-            -- Stop watching the store and wait for all paths to be pushed
-            Signals.raiseSignal Signals.sigINT
+            shutdownWorkers
+            exitFailure
         )
         System.Process.waitForProcess
 
-    Signals.raiseSignal Signals.sigINT
+    shutdownWorkers
     exitWith exitCode
   where
     getProcessHandle (_, _, _, processHandle) = processHandle

@@ -25,7 +25,7 @@ import Protolude hiding (toS)
 import Protolude.Conv
 import Servant.Client.Streaming (ClientEnv, mkClientEnv)
 import System.Directory (canonicalizePath)
-import System.Posix.Signals (getSignalMask, setSignalMask)
+import System.Posix.Signals (addSignal, emptySignalSet, getSignalMask, setSignalMask, sigINT, sigTERM)
 
 data Env = Env
   { cachixoptions :: Config.CachixOptions,
@@ -35,7 +35,8 @@ data Env = Env
 
 mkEnv :: Options.Flags -> IO Env
 mkEnv flags = do
-  signalset <- getSignalMask
+  let signalset = emptySignalSet & addSignal sigINT & addSignal sigTERM
+
   -- Initialize the Nix library
   CNix.init
 
